@@ -10,6 +10,12 @@
 > 📖 详细部署手册与 Linux 自检清单见 [`README-部署手册.md`](README-部署手册.md)；
 > 多账号批量部署与迁移方案见 [`README-多账号批量部署.md`](README-多账号批量部署.md)。
 
+## 界面预览
+
+![Web 管理台首页](docs/images/web-dashboard.png)
+
+<p align="center"><i>管理台首页：状态概览 / 账号列表（探测·签到） / 批量操作 / 内置定时</i></p>
+
 ---
 
 ## 功能特性
@@ -78,6 +84,9 @@
 │   ├── install_windows.bat / start_windows.bat
 │   ├── install_linux.sh
 │   └── jrxy-web.service
+├── docs/images/                  # README 截图
+│   ├── web-dashboard.png         #   管理台首页
+│   └── new-account.png           #   新增账号弹窗
 ├── Dockerfile / docker-compose.yml
 ├── README.md
 ├── README-部署手册.md            # 完整部署手册 + Linux 自检清单
@@ -129,6 +138,10 @@ docker compose up -d --build
 2. 列表页点「**探测**」验证登录与任务（无副作用）；
 3. 确认无误后点「**签到**」完成一次真实提交。
 
+![新增账号弹窗](docs/images/new-account.png)
+
+<p align="center"><i>新增/编辑账号弹窗：基本（账号名·学校·账号·密码·任务类型） / 签到定位 / 高级选项（异常原因·照片·标题校验·推送） / 设备绑定 deviceId</i></p>
+
 ---
 
 ## 账号与 deviceId
@@ -169,6 +182,8 @@ else:               生成 uuid4 一次，之后永久复用
 ---
 
 ## Web 管理台
+
+![Web 管理台](docs/images/web-dashboard.png)
 
 | 面板 | 功能 |
 |---|---|
@@ -289,6 +304,7 @@ cd jrxy-engine
 - 界面与接口**永不返回密码**；
 - 默认仅监听 `127.0.0.1`；对外部署务必设置 `WEB_TOKEN` + HTTPS / 反向代理；
 - 遵守学校/校园平台的使用规则，合理控制调用频率。
+- README 截图请自行打码（学校、学号、deviceId 等），再提交到公开仓库。
 
 ---
 
