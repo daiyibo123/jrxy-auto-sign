@@ -303,7 +303,7 @@
 <div class="mask" id="tokenMask">
   <div class="modal">
     <h3>需要访问令牌</h3>
-    <p>服务端已设置 WEB_TOKEN，请输入令牌后继续。</p>
+    <p>服务端已设置访问令牌，请输入后继续。令牌可自定义：环境变量 WEB_TOKEN，或写入 web-server/data/web_token.txt 后重启服务。</p>
     <input type="password" id="tokenInput" placeholder="X-Web-Token" style="width:100%;margin-bottom:14px">
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button onclick="saveToken()">确定</button>
@@ -461,10 +461,12 @@ function renderStatus(s){
   el("cSched").textContent = s.scheduler.enabled
     ? (s.scheduler.time + " 启用" + (s.scheduler.next ? " · 下次 " + s.scheduler.next : ""))
     : "已停用";
-  el("cTime").textContent = s.server_time;
+  el("cTime").textContent = s.server_time + (s.timezone ? " " + s.timezone : "")
+    + (s.system_time && s.system_time.slice(0, 16) !== s.server_time.slice(0, 16) ? "（系统时钟 " + s.system_time + "）" : "");
   el("inAuto").checked = s.scheduler.enabled;
   el("inTime").value = s.scheduler.time;
-  el("nextRun").textContent = s.scheduler.enabled && s.scheduler.next ? ("下次执行：" + s.scheduler.next) : "定时已停用";
+  el("nextRun").textContent = (s.scheduler.enabled && s.scheduler.next ? ("下次执行：" + s.scheduler.next + "（" + (s.timezone || "") + "）") : "定时已停用")
+    + (s.scheduler.last_run ? (" · 上次定时：" + s.scheduler.last_run + " " + (s.scheduler.last_result || "")) : "");
   const st = s.scheduler.enabled ? "定时批量运行中" : "定时已停用";
   el("engineText").textContent = s.engine_ready ? (s.platform + " · " + st) : "引擎环境缺失！请先部署引擎 venv";
   el("engineDot").className = "dot " + (s.engine_ready ? "on" : "off");
@@ -603,9 +605,15 @@ async function deleteAccount(name){
 }
 
 /* ================= 单账号运行 / 批量运行 ================= */
+function resultClass(s){
+  if (/失败|异常/.test(s)) return "bad";
+  if (/成功|已签到|探测通过/.test(s)) return "ok";
+  if (/未开始|暂无|重复/.test(s)) return "warn";
+  return "def";
+}
 function showResult(boxId, r){
   const box = el(boxId);
-  const cls = r.result.includes("成功") ? "ok" : (r.result.includes("未开始") || r.result.includes("重复") ? "warn" : (r.result.includes("失败")||r.result.includes("异常") ? "bad" : "def"));
+  const cls = resultClass(r.result);
   box.className = "result show " + cls;
   box.textContent = "【" + r.result + "】\n\n" + r.detail;
 }
@@ -741,7 +749,7 @@ function renderLogs(logs){
   const b = el("logBody");
   if (!logs.length){ b.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--muted)">暂无记录</td></tr>'; return; }
   b.innerHTML = logs.map(l=>{
-    const cls = l.result.includes("成功") ? "ok" : (l.result.includes("未开始") || l.result.includes("重复") ? "warn" : (l.result.includes("失败")||l.result.includes("异常") ? "bad" : "def"));
+    const cls = resultClass(l.result);
     const safe = esc(l.detail);
     return `<tr class="log-row" onclick="toggleLogDetail(this)">
       <td>${esc(l.ts)}</td>

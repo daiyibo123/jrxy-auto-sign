@@ -34,6 +34,10 @@ class AutoSign:
                                 verify=False).json()
         if len(res['datas']['unSignedTasks']) < 1:
             if len(res['datas']['leaveTasks']) < 1:
+                signed = res['datas'].get('signedTasks') or []
+                if signed:
+                    names = '、'.join(str(t.get('taskName', '')) for t in signed)
+                    raise Exception('今日已签到：%s（无需重复提交）' % names)
                 raise Exception('当前暂时没有未签到的任务哦！')
             latestTasks = res['datas']['leaveTasks']
         else:

@@ -16,9 +16,14 @@
 环境变量：
   HOST                监听地址，默认 127.0.0.1（对外部署可设 0.0.0.0）
   PORT                监听端口，默认 8000
-  WEB_TOKEN           可选；设置后所有接口需携带请求头 X-Web-Token
+  WEB_TOKEN           可选；设置后所有接口需携带请求头 X-Web-Token。
+                      也可写入 web-server/data/web_token.txt（环境变量优先），内容即令牌，可自定义
   SIGN_TIME           内置定时签到时间（24 小时制 HH:MM），默认 22:05
   AUTO_SIGN           内置定时开关，默认 1=启用 0=停用
+  TZ_OFFSET           定时/日志使用的时区（相对 UTC 小时数），默认 8=北京时间，与服务器系统时区无关
+  CATCHUP_MINUTES     错过定时点（重启/休眠/对时跳变）后多少分钟内仍补签，默认 120
+  NOTIFY_ON_DRY       探测（dry）是否也推送，默认 0（Server酱免费额度有限，留给真实签到）
+  JRXY_INTERVAL       批量时每账号间隔秒数，默认 10
   JRXY_ACCOUNTS_DIR   账号配置目录，默认 <项目根>/accounts
 
 安全提示：
@@ -28,6 +33,7 @@
     切勿让其重新生成，否则触发“更换手机频繁”风控。
 """
 import base64
+import hmac
 import json
 import logging
 import os
@@ -37,9 +43,10 @@ import subprocess
 import threading
 import time
 import uuid
+import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -65,17 +72,40 @@ ENGINE_PY = ENGINE_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/p
 SUBMIT_SCRIPT = ENGINE_DIR / "scripts" / "merged_ios_v4_submit.py"
 RANGE_SCRIPT = ENGINE_DIR / "scripts" / "fetch_sign_range.py"
 TESTLOGIN_SCRIPT = ENGINE_DIR / "scripts" / "test_login.py"
-BATCH_SCRIPT = ENGINE_DIR / "scripts" / "batch_submit.py"
+TOKEN_FILE = DATA_DIR / "web_token.txt"
 
 # ---------------- 运行配置（环境变量） ----------------
 HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
-WEB_TOKEN = os.getenv("WEB_TOKEN", "").strip()
 DEFAULT_SIGN_TIME = os.getenv("SIGN_TIME", "22:05")
 DEFAULT_AUTO_SIGN = os.getenv("AUTO_SIGN", "1") == "1"
+TZ_OFFSET = float(os.getenv("TZ_OFFSET", "8"))
+TZ = timezone(timedelta(hours=TZ_OFFSET))
+CATCHUP_MINUTES = int(os.getenv("CATCHUP_MINUTES", "120"))
+NOTIFY_ON_DRY = os.getenv("NOTIFY_ON_DRY", "0") == "1"
+ACCOUNT_INTERVAL = int(os.getenv("JRXY_INTERVAL", "10"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jrxy-web")
+
+
+def now() -> datetime:
+    """按 TZ_OFFSET（默认北京时间）取当前时间，返回 naive datetime；不依赖服务器系统时区。"""
+    return datetime.now(TZ).replace(tzinfo=None)
+
+
+def load_web_token() -> str:
+    tok = os.getenv("WEB_TOKEN", "").strip()
+    if not tok and TOKEN_FILE.exists():
+        try:
+            tok = TOKEN_FILE.read_text(encoding="utf-8-sig").strip()
+        except Exception as e:
+            log.warning("读取 %s 失败: %s", TOKEN_FILE, e)
+    return tok
+
+
+WEB_TOKEN = load_web_token()
+_run_lock = threading.Lock()
 
 # ---------------- 数据库 ----------------
 def init_db():
@@ -95,7 +125,7 @@ def save_log(kind: str, result: str, detail: str):
         with sqlite3.connect(DB_PATH) as c:
             c.execute(
                 "INSERT INTO sign_log(ts, kind, result, detail) VALUES(?,?,?,?)",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), kind, result, detail[-4000:]),
+                (now().strftime("%Y-%m-%d %H:%M:%S"), kind, result, detail[-4000:]),
             )
     except Exception as e:
         log.warning("save_log failed: %s", e)
@@ -220,6 +250,9 @@ def account_summary(name: str) -> dict:
 def run_cmd(cmd: list, timeout: int = 180, extra_env: Optional[dict] = None) -> str:
     env = dict(os.environ)
     env["JRXY_ACCOUNTS_DIR"] = str(ACCOUNTS_DIR)
+    # 子进程 stdout 是管道：Windows 默认按 GBK 输出，与下面的 utf-8 解码不一致会把中文变乱码
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     if extra_env:
         env.update(extra_env)
     try:
@@ -234,70 +267,83 @@ def run_cmd(cmd: list, timeout: int = 180, extra_env: Optional[dict] = None) -> 
         out += "\n[stderr]\n" + r.stderr.strip()
     return out or "(无输出)"
 
+RESULT_LABELS = {
+    "success": "签到成功",
+    "already": "今日已签到",
+    "no_task": "暂无待签任务",
+    "dry": "探测通过",
+    "fail": "签到失败",
+    "error": "执行异常",
+}
+
 def classify(out: str) -> str:
-    s = out
-    if any(k in s for k in ("SUCCESS", "签到成功")):
+    """优先读引擎输出的 ###RESULT### 行；没有该行（超时/旧引擎）时回退关键词判断。"""
+    res = parse_marker(out, "###RESULT###")
+    if isinstance(res, dict) and res.get("status") in RESULT_LABELS:
+        label = RESULT_LABELS[res["status"]]
+        msg = str(res.get("msg", "")).strip()
+        if res["status"] in ("already", "fail", "error") and msg:
+            return msg[:100] if msg.startswith(label) else "%s：%s" % (label, msg[:80])
+        return label
+    if "执行超时" in out or "引擎虚拟环境不存在" in out:
+        return "执行异常"
+    if "今日已签到" in out:
+        return "今日已签到"
+    if "没有未签到的任务" in out:
+        return "暂无待签任务"
+    if "SUCCESS" in out or "签到成功" in out:
         return "签到成功"
-    if "查寝未开始" in s:
-        return "查寝未开始"
-    if "签到失败" in s:
-        return "签到失败"
-    if "已签到" in s or "重复提交" in s:
-        return "已签到（重复提交）"
-    if "登录失败" in s or "Traceback" in s or "Exception" in s or "执行超时" in s:
+    if "已签到" in out or "重复提交" in out:
+        return "今日已签到（重复提交）"
+    if "登录失败" in out or "Traceback" in out or "Exception" in out:
         return "执行异常"
     return "执行完成（见详情）"
 
-def notify_head(result: str, kind: str = "签到") -> str:
-    """把结果归类为状态词：签到/探测 成功、失败、查寝未开始、无任务待签。"""
-    r = (result or "").strip()
-    if "查寝未开始" in r:
-        return "查寝未开始"
-    if "没有未签到的任务" in r:
-        return "无任务待签"
-    if any(k in r for k in ("成功", "完成", "重复提交", "已签到")):
-        return kind + "成功"
-    return kind + "失败"
+def notify_head(result: str) -> str:
+    """推送标题用的状态词：取结果标签冒号前的部分。"""
+    return (result or "未知").split("：")[0].split("（")[0].strip()
 
-def send_notify(name: str, title: str, msg: str):
-    """按账号 notifyOption 推送签到结果。
-    method=2 走 Server酱/任意 Webhook（rcvOption 填 SendKey 或完整地址）。
-    失败静默不影响主流程。"""
+def send_notify(name: str, title: str, msg: str) -> str:
+    """按账号 notifyOption 推送签到结果，返回推送结果说明（写进运行日志，便于排查）。
+    method=2 走 Server酱/任意 Webhook（rcvOption 填 SendKey 或完整地址）。"""
     try:
         user, _ = read_account(name)
-        no = user.get("notifyOption") or {}
-        if int(no.get("method", 0) or 0) != 2:
-            return
-        rcv = str(no.get("rcvOption", "")).strip()
-        if not rcv:
-            return
-        # 兼容：只填 SendKey（SCT开头）时自动拼成 Server酱推送地址
-        if rcv.startswith("SCT"):
-            rcv = "https://sctapi.ftqq.com/%s.send" % rcv
-        data = urllib.parse.urlencode({"title": title, "desp": msg}).encode("utf-8")
-        req = urllib.request.Request(
-            rcv, data=data, method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=10):
-            pass
+    except HTTPException as e:
+        return "推送跳过：%s" % e.detail
+    no = user.get("notifyOption") or {}
+    try:
+        method = int(no.get("method", 0) or 0)
+    except (TypeError, ValueError):
+        method = 0
+    rcv = str(no.get("rcvOption", "")).strip()
+    if method != 2 or not rcv:
+        return "推送未启用（账号未配置 Server酱）"
+    # 只填 SendKey 时自动拼地址：sctp 开头为 Server酱³，SCT 开头为 Server酱 Turbo
+    m = re.match(r"^sctp(\d+)t", rcv, re.I)
+    if m:
+        rcv = "https://%s.push.ft07.com/send/%s.send" % (m.group(1), rcv)
+    elif rcv.startswith("SCT"):
+        rcv = "https://sctapi.ftqq.com/%s.send" % rcv
+    data = urllib.parse.urlencode({"title": title[:32], "desp": msg}).encode("utf-8")
+    req = urllib.request.Request(
+        rcv, data=data, method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            body = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        return "推送失败：HTTP %s %s" % (e.code, body[:200])
     except Exception as e:
-        log.info("notify skipped for %s: %s", name, e)
-
-def notify_batch(out: str, kind: str = "签到"):
-    """解析批量脚本输出，对每个账号逐条推送其结果。"""
-    names = list_accounts()
-    blocks = re.split(r"账号: (\S+)", out)
-    for i in range(1, len(blocks), 2):
-        nm = blocks[i].strip(" :")
-        if nm not in names:
-            continue
-        body = blocks[i + 1] or ""
-        result = classify(body)
-        head = notify_head(result, kind="探测" if "探测" in kind else "签到")
-        send_notify(nm, "【%s】%s" % (head, nm),
-                    "%s\n时间：%s\n\n%s" % (
-                        head, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        body.strip()[-1200:] or "(无输出)"))
+        return "推送失败：%s" % e
+    try:
+        j = json.loads(body)
+    except ValueError:
+        return "推送已发送（非 JSON 响应）"
+    code = j.get("code", 0)
+    if code in (0, "0"):
+        return "推送成功（Server酱已接收）"
+    return "推送失败：code=%s %s" % (code, str(j.get("message") or j.get("info") or "")[:200])
 
 def run_account(name: str, dry: bool) -> str:
     if not ENGINE_PY.exists():
@@ -311,18 +357,53 @@ def run_account(name: str, dry: bool) -> str:
            "--dry" if dry else "--submit",
            "--variant", "fkey_cat", "--protocol", "ios",
            "--config", str(yml), "--device-id", did]
-    log.info("run_account %s dry=%s: %s", name, dry, " ".join(str(x) for x in cmd))
-    return run_cmd(cmd)
+    log.info("run_account %s dry=%s", name, dry)
+    with _run_lock:
+        return run_cmd(cmd)
 
-def batch_run(dry: bool) -> str:
-    if not ENGINE_PY.exists():
-        return "引擎虚拟环境不存在: %s" % ENGINE_PY
-    if not BATCH_SCRIPT.exists():
-        return "批量脚本不存在: %s" % BATCH_SCRIPT
-    cmd = [str(ENGINE_PY), "-W", "ignore", str(BATCH_SCRIPT),
-           "--dry" if dry else "--submit"]
-    log.info("batch_run dry=%s accounts_dir=%s", dry, ACCOUNTS_DIR)
-    return run_cmd(cmd, timeout=600)
+def run_and_report(name: str, dry: bool, trigger: str) -> tuple:
+    """执行单账号 → 判定结果 → 推送 → 写日志。返回 (result, out)。
+    手动、批量、定时三条路径都走这里，保证结果判定和通知一致。"""
+    action = "探测" if dry else "签到"
+    started = now()
+    out = run_account(name, dry)
+    result = classify(out)
+    if dry and not NOTIFY_ON_DRY:
+        push = "推送跳过（探测默认不推送，可设 NOTIFY_ON_DRY=1）"
+    else:
+        head = notify_head(result)
+        msg = "\n\n".join([
+            "**%s**" % result,
+            "- 账号：%s" % name,
+            "- 触发：%s%s" % (trigger, action),
+            "- 开始：%s" % started.strftime("%Y-%m-%d %H:%M:%S"),
+            "- 结束：%s" % now().strftime("%Y-%m-%d %H:%M:%S"),
+            "```\n%s\n```" % (out.strip()[-1200:] or "(无输出)"),
+        ])
+        push = send_notify(name, "【%s】%s" % (head, name), msg)
+    log.info("[%s%s] %s -> %s | %s", trigger, action, name, result, push)
+    save_log("%s%s[%s]" % (trigger, action, name), result, "%s\n\n[%s]" % (out, push))
+    return result, out
+
+def run_all(dry: bool, trigger: str) -> tuple:
+    """逐个账号执行（间隔 ACCOUNT_INTERVAL 秒错峰），返回 (汇总, 详情)。"""
+    names = list_accounts()
+    if not names:
+        return "没有可用账号", "未在 %s 找到账号配置" % ACCOUNTS_DIR
+    counts, lines = {}, []
+    for i, nm in enumerate(names):
+        if i:
+            time.sleep(ACCOUNT_INTERVAL)
+        try:
+            result, _ = run_and_report(nm, dry, trigger)
+        except Exception as e:
+            result = "执行异常：%s" % e
+            log.exception("run_all %s failed", nm)
+        head = notify_head(result)
+        counts[head] = counts.get(head, 0) + 1
+        lines.append("%s：%s" % (nm, result))
+    summary = " / ".join("%s %d" % kv for kv in counts.items())
+    return summary, "\n".join(lines)
 
 def parse_marker(out: str, marker: str):
     for line in out.splitlines():
@@ -334,20 +415,30 @@ def parse_marker(out: str, marker: str):
     return None
 
 # ---------------- 定时（线程版，触发时批量跑全部账号） ----------------
+# schedule.json 里的 last_slot 记录最近一次已执行的计划时间点（"YYYY-MM-DD HH:MM"），
+# 用来保证每个时间点只执行一次，并在错过时间点（重启/休眠/对时跳变）后补签。
+_SCHED_KEYS = ("enabled", "time", "last_slot", "last_run", "last_result")
+
 def load_schedule():
-    st = {"enabled": DEFAULT_AUTO_SIGN, "time": DEFAULT_SIGN_TIME, "next": None}
+    st = {"enabled": DEFAULT_AUTO_SIGN, "time": DEFAULT_SIGN_TIME, "next": None,
+          "last_slot": None, "last_run": None, "last_result": None}
     if SCHED_PATH.exists():
         try:
             d = json.loads(SCHED_PATH.read_text(encoding="utf-8"))
             st["enabled"] = bool(d.get("enabled", st["enabled"]))
             st["time"] = str(d.get("time", st["time"]))
+            for k in ("last_slot", "last_run", "last_result"):
+                st[k] = d.get(k)
         except Exception:
             pass
     return st
 
-def save_schedule(enabled: bool, time_str: str):
-    SCHED_PATH.write_text(json.dumps({"enabled": enabled, "time": time_str},
-                                     ensure_ascii=False, indent=2), encoding="utf-8")
+def save_schedule():
+    d = {k: scheduler_state.get(k) for k in _SCHED_KEYS}
+    try:
+        SCHED_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("save_schedule failed: %s", e)
 
 scheduler_state = load_schedule()
 _sched_wake = threading.Event()
@@ -362,51 +453,87 @@ def _parse_hm(s: str):
     except Exception:
         raise ValueError("时间格式应为 HH:MM（如 22:05）")
 
-def _calc_next(time_str):
-    try:
-        h, m = _parse_hm(time_str)
-    except ValueError:
-        return None, None
-    now = datetime.now()
-    nxt = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    if nxt <= now:
-        nxt += timedelta(days=1)
-    return nxt, nxt.strftime("%Y-%m-%d %H:%M:%S")
+SLOT_FMT = "%Y-%m-%d %H:%M"
+
+def _slot_today(time_str: str, ref: datetime) -> datetime:
+    h, m = _parse_hm(time_str)
+    return ref.replace(hour=h, minute=m, second=0, microsecond=0)
+
+def _mark_past_slot_done():
+    """把“最近一个已过去的时间点”记为已执行：保存/启用定时不会立刻补跑，下次执行一定在未来。"""
+    t = now()
+    slot = _slot_today(scheduler_state["time"], t)
+    if slot > t:
+        slot -= timedelta(days=1)
+    scheduler_state["last_slot"] = slot.strftime(SLOT_FMT)
+
+def _pending_slot(time_str: str):
+    """返回下一个待执行的时间点：今天的点已过但未执行且仍在补签窗口内则返回它（立即执行），
+    否则返回未来最近的点。"""
+    t = now()
+    today = _slot_today(time_str, t)
+    done = scheduler_state.get("last_slot")
+    if today <= t:
+        if done != today.strftime(SLOT_FMT) and t - today <= timedelta(minutes=CATCHUP_MINUTES):
+            return today
+        return today + timedelta(days=1)
+    return today
+
+def _fire(slot: datetime):
+    scheduler_state["last_slot"] = slot.strftime(SLOT_FMT)
+    save_schedule()   # 先落盘，执行中途崩溃/重启也不会重复执行同一个时间点
+    started = now()
+    delay = int((started - slot).total_seconds())
+    trigger = "定时" if delay < 120 else "定时补签"
+    log.info("%s触发：计划 %s，实际 %s（延迟 %ss）", trigger, slot.strftime(SLOT_FMT),
+             started.strftime("%H:%M:%S"), delay)
+    summary, detail = run_all(dry=False, trigger=trigger)
+    scheduler_state["last_run"] = started.strftime("%Y-%m-%d %H:%M:%S")
+    scheduler_state["last_result"] = summary
+    save_schedule()
+    save_log("%s汇总" % trigger, summary,
+             "计划时间 %s（UTC%+g）\n实际开始 %s（延迟 %ss）\n\n%s" % (
+                 slot.strftime(SLOT_FMT), TZ_OFFSET,
+                 started.strftime("%Y-%m-%d %H:%M:%S"), delay, detail))
 
 def scheduler_loop():
     while True:
         st = scheduler_state
-        if st["enabled"]:
-            now = datetime.now()
-            nxt, nxt_str = _calc_next(st["time"])
-            if nxt is None:
+        try:
+            if not st["enabled"]:
                 st["next"] = None
-                _sched_wake.wait(timeout=60)
+                _sched_wake.wait(timeout=30)
                 _sched_wake.clear()
                 continue
-            st["next"] = nxt_str
-            wait = (nxt - now).total_seconds()
-            if wait > 60:
-                _sched_wake.wait(timeout=60)
-                _sched_wake.clear()
+            slot = _pending_slot(st["time"])
+            st["next"] = slot.strftime("%Y-%m-%d %H:%M:%S")
+            wait = (slot - now()).total_seconds()
+            if wait <= 0:
+                _fire(slot)
                 continue
-            _sched_wake.wait(timeout=max(wait, 1))
+            # 每次最多睡 30 秒再按墙上时间重算：设置变更、系统对时跳变都能及时生效
+            _sched_wake.wait(timeout=min(wait, 30))
             _sched_wake.clear()
-            log.info("定时批量签到触发（%s）", st["time"])
-            out = batch_run(dry=False)
-            save_log("定时批量签到", classify(out), out)
-            notify_batch(out, "定时签到")
-        else:
-            st["next"] = None
-            _sched_wake.wait(timeout=30)
-            _sched_wake.clear()
+        except Exception:
+            log.exception("scheduler loop error")
+            time.sleep(30)
 
 def _start_scheduler():
+    if not scheduler_state.get("last_slot"):
+        # 首次启动/从旧版升级：没有执行记录时不补跑已过去的时间点
+        try:
+            _mark_past_slot_done()
+            save_schedule()
+        except ValueError:
+            pass
+    log.info("内置定时：enabled=%s time=%s 时区=UTC%+g 当前=%s token=%s",
+             scheduler_state["enabled"], scheduler_state["time"], TZ_OFFSET,
+             now().strftime("%Y-%m-%d %H:%M:%S"), "已启用" if WEB_TOKEN else "未设置")
     threading.Thread(target=scheduler_loop, daemon=True, name="jrxy-scheduler").start()
 
 # ---------------- FastAPI ----------------
 def require_token(x_web_token: Optional[str] = Header(default=None)):
-    if WEB_TOKEN and x_web_token != WEB_TOKEN:
+    if WEB_TOKEN and not hmac.compare_digest((x_web_token or "").encode(), WEB_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="未授权：缺少或错误的 X-Web-Token")
 
 app = FastAPI(title="今日校园自动签到 · 多账号管理台", docs_url="/api/docs", redoc_url=None)
@@ -430,8 +557,12 @@ def api_status(_t: None = Depends(require_token)):
             "enabled": scheduler_state["enabled"],
             "time": scheduler_state["time"],
             "next": scheduler_state["next"],
+            "last_run": scheduler_state.get("last_run"),
+            "last_result": scheduler_state.get("last_result"),
         },
-        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "server_time": now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timezone": "UTC%+g" % TZ_OFFSET,
+        "system_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 # ---------------- 账号管理 ----------------
@@ -564,16 +695,7 @@ def api_account_run(name: str, body: dict, _t: None = Depends(require_token)):
     if mode not in ("dry", "submit"):
         raise HTTPException(status_code=400, detail="mode 仅支持 dry / submit")
     read_account(name)
-    kind = f"账号[{name}] {'探测' if mode == 'dry' else '签到'}"
-    out = run_account(name, dry=(mode == "dry"))
-    result = classify(out)
-    save_log(kind, result, out)
-    # 探测与签到都推送（头部状态化：探测成功/探测失败/查寝未开始/无任务待签）
-    head = notify_head(result, kind="探测" if mode == "dry" else "签到")
-    send_notify(name, "【%s】%s" % (head, name),
-                "%s\n时间：%s\n\n%s" % (
-                    head, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    out.strip()[-1200:] or "(无输出)"))
+    result, out = run_and_report(name, dry=(mode == "dry"), trigger="手动")
     return {"ok": True, "result": result, "detail": out[-4000:]}
 
 @app.post("/api/accounts/{name}/test-login")
@@ -656,15 +778,8 @@ def api_batch_run(body: dict, _t: None = Depends(require_token)):
     mode = str(body.get("mode", "dry"))
     if mode not in ("dry", "submit"):
         raise HTTPException(status_code=400, detail="mode 仅支持 dry / submit")
-    kind = "批量探测" if mode == "dry" else "批量签到"
-    out = batch_run(dry=(mode == "dry"))
-    result = classify(out)
-    if "批量完成" in out:
-        result = out.split("批量完成", 1)[1].strip().splitlines()[0].strip()
-    save_log(kind, result, out)
-    # 批量探测与批量签到都推送（逐账号，头部状态化）
-    notify_batch(out, kind)
-    return {"ok": True, "result": result, "detail": out[-4000:]}
+    summary, detail = run_all(dry=(mode == "dry"), trigger="批量")
+    return {"ok": True, "result": summary, "detail": detail}
 
 @app.post("/api/schedule")
 def api_schedule(body: dict, _t: None = Depends(require_token)):
@@ -676,10 +791,12 @@ def api_schedule(body: dict, _t: None = Depends(require_token)):
         raise HTTPException(status_code=400, detail=str(e))
     scheduler_state["enabled"] = enabled
     scheduler_state["time"] = t
-    _, nxt_str = _calc_next(t)
+    _mark_past_slot_done()
+    nxt_str = _pending_slot(t).strftime("%Y-%m-%d %H:%M:%S") if enabled else None
     scheduler_state["next"] = nxt_str
-    save_schedule(enabled, t)
-    save_log("定时更新", "定时批量签到设置已更新", "enabled=%s time=%s" % (enabled, t))
+    save_schedule()
+    save_log("定时更新", "定时批量签到设置已更新",
+             "enabled=%s time=%s（UTC%+g） 下次执行 %s" % (enabled, t, TZ_OFFSET, nxt_str or "-"))
     _sched_wake.set()
     return {"ok": True, "scheduler": {"enabled": enabled, "time": t, "next": nxt_str}}
 

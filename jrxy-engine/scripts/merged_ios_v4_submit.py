@@ -378,7 +378,32 @@ def submit_app_native(session, host, api, form, aes_key, tenant_id, user_id,
 # ===========================================================================
 # 7. 主流程
 # ===========================================================================
+RESULT_MARKER = "###RESULT###"
+
+
+def emit_result(status, msg=""):
+    """输出机器可读结果行，供 Web 端判定（status: success/already/no_task/dry/fail/error）。"""
+    print(RESULT_MARKER + json.dumps({"status": status, "msg": str(msg)[:300]},
+                                     ensure_ascii=False), flush=True)
+
+
 def main():
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except Exception as e:
+        msg = str(e).strip()
+        if "今日已签到" in msg:
+            emit_result("already", msg)
+        elif "没有未签到的任务" in msg:
+            emit_result("no_task", msg)
+        else:
+            emit_result("error", "%s: %s" % (type(e).__name__, msg))
+        raise
+
+
+def _main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="只探测不提交（默认行为）")
     ap.add_argument("--submit", action="store_true", help="真正提交签到（否则只 dry-run）")
@@ -489,6 +514,7 @@ def main():
     except SecretError as e:
         print("❌ 领取失败:", e)
         print("   -> getSecretKey 主机/会话不匹配，需换 host 或带正确 SessionToken。")
+        emit_result("error", "getSecretKey 失败: %s" % e)
         sys.exit(2)
 
     cands = key_candidates(cpdaily_raw, cat)
@@ -508,6 +534,7 @@ def main():
     if not args.submit:
         print()
         print("== DRY RUN 结束（未提交）。确认无误后加 --submit 真正提交。==")
+        emit_result("dry", "有待签任务，探测通过（未提交）")
         return
 
     print()
@@ -519,9 +546,11 @@ def main():
     to_try = cands if not args.variant else [c for c in cands if c[0] == args.variant]
     if not to_try:
         print("未知 variant:", args.variant)
+        emit_result("error", "未知 variant: %s" % args.variant)
         sys.exit(2)
     to_try = to_try[:max(1, args.max_tries)]
 
+    last_err = ""
     for name, key, desc in to_try:
         print("\n--- 尝试候选 [%s] %s ---" % (name, desc))
         try:
@@ -546,24 +575,34 @@ def main():
                                      device_id, session_token, args.sign_mode)
         except Exception as e:
             print("请求异常:", e)
+            last_err = "请求异常: %s" % e
             continue
         print("HTTP", resp.status_code)
         print("响应:", resp.text[:400])
         if "版本过低" in resp.text:
             print("=> 仍报版本过低（key 不对），继续下一个候选")
+            last_err = "版本过低"
             time.sleep(1.5)
             continue
         print("=> 响应不是“版本过低”，key 可能正确！")
         try:
             j = resp.json()
-            if j.get("message") == "SUCCESS":
-                print("🎉🎉 签到成功！")
-                return
-            print("服务端消息:", j.get("message"))
         except Exception:
-            pass
+            emit_result("fail", "HTTP %s 非 JSON 响应: %s" % (resp.status_code, resp.text[:200]))
+            return
+        message = str(j.get("message", ""))
+        if message == "SUCCESS":
+            emit_result("success", "SUCCESS")
+            print("🎉🎉 签到成功！")
+            return
+        print("服务端消息:", message)
+        if "已签" in message or "重复" in message:
+            emit_result("already", message)
+        else:
+            emit_result("fail", message or resp.text[:200])
         # 非版本过低即视为找到正确 key，停止继续
         return
+    emit_result("fail", "全部候选密钥均未成功（%s）" % (last_err or "无响应"))
 
 
 if __name__ == "__main__":

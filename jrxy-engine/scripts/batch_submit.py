@@ -104,13 +104,14 @@ def run_one(stem: str, yml_path: str, did_file: str, submit: bool) -> str:
         print(f"  ❌ {stem}: {e}")
         return "fail"
     print("=" * 60)
-    print(f"账号: {name}  (deviceId: {did[:8]}…, 文件: {os.path.basename(did_file)})")
+    print(f"账号: {stem}  (学号: {name}, deviceId: {did[:8]}…, 文件: {os.path.basename(did_file)})")
     cmd = [engine_python(), "-W", "ignore", SUBMIT_SCRIPT,
            "--submit" if submit else "--dry",
            "--variant", "fkey_cat", "--protocol", "ios",
            "--config", yml_path, "--device-id", did]
+    env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     try:
-        r = subprocess.run(cmd, cwd=ENGINE_DIR, env=dict(os.environ),
+        r = subprocess.run(cmd, cwd=ENGINE_DIR, env=env,
                            capture_output=True, text=True, timeout=180,
                            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
@@ -120,9 +121,9 @@ def run_one(stem: str, yml_path: str, did_file: str, submit: bool) -> str:
     if r.stderr and r.stderr.strip():
         out += "\n[stderr]\n" + r.stderr.strip()
     print(out[-1500:])
-    if "SUCCESS" in out or "签到成功" in out:
+    if '"status": "success"' in out or "签到成功" in out:
         return "ok"
-    if "已签到" in out or "重复提交" in out:
+    if '"status": "already"' in out or "已签到" in out or "重复提交" in out:
         return "warn"
     return "fail"
 
