@@ -112,10 +112,10 @@ def run_one(stem: str, yml_path: str, did_file: str, submit: bool) -> str:
     env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     try:
         r = subprocess.run(cmd, cwd=ENGINE_DIR, env=env,
-                           capture_output=True, text=True, timeout=180,
+                           capture_output=True, text=True, timeout=int(os.getenv("JRXY_RUN_TIMEOUT", "300")),
                            encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
-        print("  ⚠️ 执行超时（180s），可能卡在登录/网络请求上")
+        print("  ⚠️ 执行超时，可能卡在登录/网络请求上")
         return "warn"
     out = (r.stdout or "").strip()
     if r.stderr and r.stderr.strip():

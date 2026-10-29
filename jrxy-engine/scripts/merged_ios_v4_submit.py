@@ -387,6 +387,33 @@ def emit_result(status, msg=""):
                                      ensure_ascii=False), flush=True)
 
 
+def is_signed(wise, sign):
+    """复查当天任务列表：本次提交的任务已出现在 signedTasks 则返回 True；查询失败返回 None。"""
+    try:
+        headers = dict(wise.session.headers)
+        headers["Content-Type"] = "application/json"
+        res = wise.session.post(wise.campus_host + sign.apis[0], headers=headers,
+                                data=json.dumps({}), verify=False).json()
+        wid = str(sign.taskInfo.get("signInstanceWid"))
+        signed = (res.get("datas") or {}).get("signedTasks") or []
+        return any(str(t.get("signInstanceWid")) == wid for t in signed)
+    except Exception as e:
+        print("复查签到状态失败:", e)
+        return None
+
+
+def confirm_signed(wise, sign, reason):
+    """提交请求超时/异常后复查一次；确认已签则输出 success 并返回 True。"""
+    time.sleep(3)
+    state = is_signed(wise, sign)
+    print("复查签到状态（%s）: %s" % (reason, {True: "已签到", False: "未签到", None: "未知"}[state]))
+    if state:
+        emit_result("success", "%s，但复查确认已签到" % reason)
+        print("🎉🎉 签到成功！（复查确认）")
+        return True
+    return False
+
+
 def main():
     try:
         _main()
@@ -575,6 +602,9 @@ def _main():
                                      device_id, session_token, args.sign_mode)
         except Exception as e:
             print("请求异常:", e)
+            # 请求可能已到达服务器（只是没等到响应），先复查再决定，避免重复提交
+            if confirm_signed(wise, sign, "提交请求异常（%s）" % type(e).__name__):
+                return
             last_err = "请求异常: %s" % e
             continue
         print("HTTP", resp.status_code)
@@ -588,6 +618,8 @@ def _main():
         try:
             j = resp.json()
         except Exception:
+            if confirm_signed(wise, sign, "提交返回 HTTP %s" % resp.status_code):
+                return
             emit_result("fail", "HTTP %s 非 JSON 响应: %s" % (resp.status_code, resp.text[:200]))
             return
         message = str(j.get("message", ""))

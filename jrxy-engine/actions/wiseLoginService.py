@@ -1,12 +1,38 @@
 """登录总入口：按学校名查campus_host/login_url/login_type并选CAS/IAP。"""
+import os
 import re
 import requests
+from requests.adapters import HTTPAdapter
 from urllib3.exceptions import InsecureRequestWarning
+from urllib3.util.retry import Retry
 from actions.casLogin import casLogin
 from actions.iapLogin import iapLogin
 from actions.utils import Utils
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+# (连接超时, 读取超时) 秒；服务器在境外时可用环境变量 JRXY_HTTP_TIMEOUT 调大读取超时
+HTTP_TIMEOUT = (10, int(os.getenv("JRXY_HTTP_TIMEOUT", "30")))
+
+
+class TimeoutSession(requests.Session):
+    """所有请求默认带超时，避免某个请求无限挂起、把整个签到进程拖到被强制结束。"""
+
+    def request(self, method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = HTTP_TIMEOUT
+        return super().request(method, url, **kwargs)
+
+
+def new_session() -> requests.Session:
+    s = TimeoutSession()
+    # 只重试“连接没建立”的失败（请求肯定没到服务器），不重试读超时，避免重复提交签到
+    retry = Retry(total=2, connect=2, read=0, status=0, redirect=0,
+                  backoff_factor=0.5, raise_on_status=False)
+    adapter = HTTPAdapter(max_retries=retry)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
 
 
 class wiseLoginService:
@@ -20,14 +46,12 @@ class wiseLoginService:
         self.username = userInfo['username']
         self.password = userInfo['password']
         self.schoolName = userInfo['schoolName']
-        self.session = requests.session()
+        self.session = new_session()
         headers = {
             'User-Agent':
             'Mozilla/5.0 (Linux; Android 8.0.0; MI 6 Build/OPR1.170623.027; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/92.0.4515.131 Mobile Safari/537.36 okhttp/3.12.4',
         }
         self.session.headers = headers
-        self.session.hooks['response'].append(Utils.checkStatus)
-        self.session.adapters.DEFAULT_RETRIES = 5
         if httpProxy != '':
             Utils.log('全局代理已启用')
             self.session.proxies = {'http': httpProxy, 'https': httpProxy}

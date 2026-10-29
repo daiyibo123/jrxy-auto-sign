@@ -24,6 +24,8 @@
   CATCHUP_MINUTES     错过定时点（重启/休眠/对时跳变）后多少分钟内仍补签，默认 120
   NOTIFY_ON_DRY       探测（dry）是否也推送，默认 0（Server酱免费额度有限，留给真实签到）
   JRXY_INTERVAL       批量时每账号间隔秒数，默认 10
+  JRXY_RUN_TIMEOUT    单个账号一次执行的最长秒数，默认 300
+  JRXY_HTTP_TIMEOUT   引擎单个网络请求的读取超时秒数，默认 30
   JRXY_ACCOUNTS_DIR   账号配置目录，默认 <项目根>/accounts
 
 安全提示：
@@ -84,6 +86,7 @@ TZ = timezone(timedelta(hours=TZ_OFFSET))
 CATCHUP_MINUTES = int(os.getenv("CATCHUP_MINUTES", "120"))
 NOTIFY_ON_DRY = os.getenv("NOTIFY_ON_DRY", "0") == "1"
 ACCOUNT_INTERVAL = int(os.getenv("JRXY_INTERVAL", "10"))
+RUN_TIMEOUT = int(os.getenv("JRXY_RUN_TIMEOUT", "300"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jrxy-web")
@@ -359,7 +362,7 @@ def run_account(name: str, dry: bool) -> str:
            "--config", str(yml), "--device-id", did]
     log.info("run_account %s dry=%s", name, dry)
     with _run_lock:
-        return run_cmd(cmd)
+        return run_cmd(cmd, timeout=RUN_TIMEOUT)
 
 def run_and_report(name: str, dry: bool, trigger: str) -> tuple:
     """执行单账号 → 判定结果 → 推送 → 写日志。返回 (result, out)。
@@ -385,25 +388,36 @@ def run_and_report(name: str, dry: bool, trigger: str) -> tuple:
     save_log("%s%s[%s]" % (trigger, action, name), result, "%s\n\n[%s]" % (out, push))
     return result, out
 
-def run_all(dry: bool, trigger: str) -> tuple:
-    """逐个账号执行（间隔 ACCOUNT_INTERVAL 秒错峰），返回 (汇总, 详情)。"""
+def summarize(results: dict) -> tuple:
+    """results: {账号名: 结果}，返回 (汇总, 详情)。"""
+    counts = {}
+    for r in results.values():
+        head = notify_head(r)
+        counts[head] = counts.get(head, 0) + 1
+    summary = " / ".join("%s %d" % kv for kv in counts.items()) or "没有可用账号"
+    return summary, "\n".join("%s：%s" % kv for kv in results.items())
+
+def run_all(dry: bool, trigger: str, skip=(), on_done=None) -> tuple:
+    """逐个账号串行执行（间隔 ACCOUNT_INTERVAL 秒错峰），返回 (汇总, 详情)。
+    skip 中的账号不执行；on_done(账号名, 结果) 在每个账号完成后立即回调（用于落盘进度）。"""
     names = list_accounts()
     if not names:
         return "没有可用账号", "未在 %s 找到账号配置" % ACCOUNTS_DIR
-    counts, lines = {}, []
-    for i, nm in enumerate(names):
-        if i:
+    results = {}
+    for nm in names:
+        if nm in skip:
+            continue
+        if results:
             time.sleep(ACCOUNT_INTERVAL)
         try:
             result, _ = run_and_report(nm, dry, trigger)
         except Exception as e:
             result = "执行异常：%s" % e
             log.exception("run_all %s failed", nm)
-        head = notify_head(result)
-        counts[head] = counts.get(head, 0) + 1
-        lines.append("%s：%s" % (nm, result))
-    summary = " / ".join("%s %d" % kv for kv in counts.items())
-    return summary, "\n".join(lines)
+        results[nm] = result
+        if on_done:
+            on_done(nm, result)
+    return summarize(results)
 
 def parse_marker(out: str, marker: str):
     for line in out.splitlines():
@@ -415,30 +429,39 @@ def parse_marker(out: str, marker: str):
     return None
 
 # ---------------- 定时（线程版，触发时批量跑全部账号） ----------------
-# schedule.json 里的 last_slot 记录最近一次已执行的计划时间点（"YYYY-MM-DD HH:MM"），
-# 用来保证每个时间点只执行一次，并在错过时间点（重启/休眠/对时跳变）后补签。
-_SCHED_KEYS = ("enabled", "time", "last_slot", "last_run", "last_result")
+# schedule.json：
+#   last_slot  最近一个“全部账号都已执行完”的计划时间点（"YYYY-MM-DD HH:MM"），每个点只执行一次
+#   progress   正在执行的时间点及已完成账号 {"slot":..., "started":..., "results": {账号: 结果}}；
+#              执行中途重启后，补签窗口内只补跑 results 里没有的账号
+_SCHED_KEYS = ("enabled", "time", "last_slot", "last_run", "last_result", "progress")
 
 def load_schedule():
     st = {"enabled": DEFAULT_AUTO_SIGN, "time": DEFAULT_SIGN_TIME, "next": None,
-          "last_slot": None, "last_run": None, "last_result": None}
+          "last_slot": None, "last_run": None, "last_result": None, "progress": None}
     if SCHED_PATH.exists():
         try:
             d = json.loads(SCHED_PATH.read_text(encoding="utf-8"))
             st["enabled"] = bool(d.get("enabled", st["enabled"]))
             st["time"] = str(d.get("time", st["time"]))
-            for k in ("last_slot", "last_run", "last_result"):
+            for k in ("last_slot", "last_run", "last_result", "progress"):
                 st[k] = d.get(k)
         except Exception:
             pass
+    if not isinstance(st["progress"], dict) or not isinstance(st["progress"].get("results"), dict):
+        st["progress"] = None
     return st
 
+_sched_file_lock = threading.Lock()
+
 def save_schedule():
-    d = {k: scheduler_state.get(k) for k in _SCHED_KEYS}
-    try:
-        SCHED_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        log.warning("save_schedule failed: %s", e)
+    with _sched_file_lock:
+        d = {k: scheduler_state.get(k) for k in _SCHED_KEYS}
+        tmp = SCHED_PATH.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp, SCHED_PATH)   # 原子替换：写到一半断电也不会留下损坏的 schedule.json
+        except Exception as e:
+            log.warning("save_schedule failed: %s", e)
 
 scheduler_state = load_schedule()
 _sched_wake = threading.Event()
@@ -465,6 +488,9 @@ def _mark_past_slot_done():
     slot = _slot_today(scheduler_state["time"], t)
     if slot > t:
         slot -= timedelta(days=1)
+    prog = scheduler_state.get("progress")
+    if prog and prog.get("slot") == slot.strftime(SLOT_FMT):
+        return   # 该时间点还有账号没跑完，保留给补签
     scheduler_state["last_slot"] = slot.strftime(SLOT_FMT)
 
 def _pending_slot(time_str: str):
@@ -480,20 +506,40 @@ def _pending_slot(time_str: str):
     return today
 
 def _fire(slot: datetime):
-    scheduler_state["last_slot"] = slot.strftime(SLOT_FMT)
-    save_schedule()   # 先落盘，执行中途崩溃/重启也不会重复执行同一个时间点
+    slot_s = slot.strftime(SLOT_FMT)
     started = now()
     delay = int((started - slot).total_seconds())
-    trigger = "定时" if delay < 120 else "定时补签"
-    log.info("%s触发：计划 %s，实际 %s（延迟 %ss）", trigger, slot.strftime(SLOT_FMT),
-             started.strftime("%H:%M:%S"), delay)
-    summary, detail = run_all(dry=False, trigger=trigger)
-    scheduler_state["last_run"] = started.strftime("%Y-%m-%d %H:%M:%S")
-    scheduler_state["last_result"] = summary
+    prog = scheduler_state.get("progress")
+    if not prog or prog.get("slot") != slot_s:
+        prog = {"slot": slot_s, "started": started.strftime("%Y-%m-%d %H:%M:%S"), "results": {}}
+    done = dict(prog["results"])
+    if done:
+        trigger = "定时续签"
+    else:
+        trigger = "定时" if delay < 120 else "定时补签"
+    scheduler_state["progress"] = prog
     save_schedule()
+    log.info("%s触发：计划 %s，实际 %s（延迟 %ss）%s", trigger, slot_s,
+             started.strftime("%H:%M:%S"), delay,
+             "，已完成 %s，只跑剩余账号" % "、".join(done) if done else "")
+
+    def on_done(nm, result):
+        prog["results"][nm] = result
+        save_schedule()   # 每签完一个账号就落盘，中途重启不会重签已完成的账号
+
+    try:
+        run_all(dry=False, trigger=trigger, skip=done, on_done=on_done)
+    finally:
+        # 无论成功与否都把该时间点标记为已执行，避免异常时同一时间点被反复触发
+        scheduler_state["last_slot"] = slot_s
+        scheduler_state["progress"] = None
+        summary, detail = summarize(prog["results"])
+        scheduler_state["last_run"] = prog["started"]
+        scheduler_state["last_result"] = summary
+        save_schedule()
     save_log("%s汇总" % trigger, summary,
-             "计划时间 %s（UTC%+g）\n实际开始 %s（延迟 %ss）\n\n%s" % (
-                 slot.strftime(SLOT_FMT), TZ_OFFSET,
+             "计划时间 %s（UTC%+g）\n首次开始 %s\n本次开始 %s（延迟 %ss）\n\n%s" % (
+                 slot_s, TZ_OFFSET, prog["started"],
                  started.strftime("%Y-%m-%d %H:%M:%S"), delay, detail))
 
 def scheduler_loop():
@@ -519,7 +565,7 @@ def scheduler_loop():
             time.sleep(30)
 
 def _start_scheduler():
-    if not scheduler_state.get("last_slot"):
+    if not scheduler_state.get("last_slot") and not scheduler_state.get("progress"):
         # 首次启动/从旧版升级：没有执行记录时不补跑已过去的时间点
         try:
             _mark_past_slot_done()
