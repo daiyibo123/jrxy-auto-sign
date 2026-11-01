@@ -25,6 +25,8 @@
   NOTIFY_ON_DRY       探测（dry）是否也推送，默认 0（Server酱免费额度有限，留给真实签到）
   JRXY_INTERVAL       批量时每账号间隔秒数，默认 10
   JRXY_RUN_TIMEOUT    单个账号一次执行的最长秒数，默认 300
+  RETRY_DELAY_MINUTES 定时签到中“执行异常”的账号隔多少分钟重试，默认 5
+  MAX_RETRIES         定时签到中“执行异常”的账号最多重试几次，默认 2（即最多共执行 3 次）
   JRXY_HTTP_TIMEOUT   引擎单个网络请求的读取超时秒数，默认 30
   JRXY_ACCOUNTS_DIR   账号配置目录，默认 <项目根>/accounts
 
@@ -87,6 +89,8 @@ CATCHUP_MINUTES = int(os.getenv("CATCHUP_MINUTES", "120"))
 NOTIFY_ON_DRY = os.getenv("NOTIFY_ON_DRY", "0") == "1"
 ACCOUNT_INTERVAL = int(os.getenv("JRXY_INTERVAL", "10"))
 RUN_TIMEOUT = int(os.getenv("JRXY_RUN_TIMEOUT", "300"))
+RETRY_DELAY_MINUTES = float(os.getenv("RETRY_DELAY_MINUTES", "5"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("jrxy-web")
@@ -364,15 +368,21 @@ def run_account(name: str, dry: bool) -> str:
     with _run_lock:
         return run_cmd(cmd, timeout=RUN_TIMEOUT)
 
-def run_and_report(name: str, dry: bool, trigger: str) -> tuple:
+def is_exec_error(result: str) -> bool:
+    return notify_head(result) == "执行异常"
+
+def run_and_report(name: str, dry: bool, trigger: str, will_retry: bool = False) -> tuple:
     """执行单账号 → 判定结果 → 推送 → 写日志。返回 (result, out)。
-    手动、批量、定时三条路径都走这里，保证结果判定和通知一致。"""
+    手动、批量、定时三条路径都走这里，保证结果判定和通知一致。
+    will_retry=True 表示本次若执行异常还会重试，此时不推送，只推送最终结果。"""
     action = "探测" if dry else "签到"
     started = now()
     out = run_account(name, dry)
     result = classify(out)
     if dry and not NOTIFY_ON_DRY:
         push = "推送跳过（探测默认不推送，可设 NOTIFY_ON_DRY=1）"
+    elif will_retry and is_exec_error(result):
+        push = "推送跳过（执行异常，%g 分钟后重试）" % RETRY_DELAY_MINUTES
     else:
         head = notify_head(result)
         msg = "\n\n".join([
@@ -505,30 +515,72 @@ def _pending_slot(time_str: str):
         return today + timedelta(days=1)
     return today
 
+def _wait_until(t: datetime):
+    """睡到 t（按 now() 计时），分段睡，便于测试与时钟跳变。"""
+    while True:
+        left = (t - now()).total_seconds()
+        if left <= 0:
+            return
+        time.sleep(min(left, 30))
+
 def _fire(slot: datetime):
+    """执行一个定时点：先串行跑全部账号；“执行异常”的账号隔 RETRY_DELAY_MINUTES 分钟
+    再串行重试，最多 MAX_RETRIES 次，成功/已签/失败即停止。
+    progress 记录每个账号的结果与已执行次数，每跑完一个账号就落盘，中途重启可接着跑。"""
     slot_s = slot.strftime(SLOT_FMT)
     started = now()
     delay = int((started - slot).total_seconds())
     prog = scheduler_state.get("progress")
     if not prog or prog.get("slot") != slot_s:
         prog = {"slot": slot_s, "started": started.strftime("%Y-%m-%d %H:%M:%S"), "results": {}}
-    done = dict(prog["results"])
-    if done:
-        trigger = "定时续签"
-    else:
-        trigger = "定时" if delay < 120 else "定时补签"
+    prog.setdefault("attempts", {nm: 1 for nm in prog["results"]})
+    resumed = bool(prog["results"])
+    base_trigger = "定时续签" if resumed else ("定时" if delay < 120 else "定时补签")
     scheduler_state["progress"] = prog
     save_schedule()
-    log.info("%s触发：计划 %s，实际 %s（延迟 %ss）%s", trigger, slot_s,
+    log.info("%s触发：计划 %s，实际 %s（延迟 %ss）%s", base_trigger, slot_s,
              started.strftime("%H:%M:%S"), delay,
-             "，已完成 %s，只跑剩余账号" % "、".join(done) if done else "")
+             "，已执行 %s，只跑剩余/待重试账号" % "、".join(prog["results"]) if resumed else "")
+    max_attempts = 1 + max(0, MAX_RETRIES)
 
-    def on_done(nm, result):
+    def run_one(nm, trigger):
+        n = prog["attempts"].get(nm, 0) + 1
+        try:
+            result, _ = run_and_report(nm, False, trigger, will_retry=n < max_attempts)
+        except Exception as e:
+            result = "执行异常：%s" % e
+            log.exception("定时 %s 执行出错", nm)
+        prog["attempts"][nm] = n
         prog["results"][nm] = result
-        save_schedule()   # 每签完一个账号就落盘，中途重启不会重签已完成的账号
+        save_schedule()   # 每跑完一个账号就落盘，中途重启不会重签已完成的账号
 
     try:
-        run_all(dry=False, trigger=trigger, skip=done, on_done=on_done)
+        names = list_accounts()
+        first = True
+        # 第一轮：还没执行过的账号
+        for nm in [n for n in names if n not in prog["results"]]:
+            if not first:
+                time.sleep(ACCOUNT_INTERVAL)
+            first = False
+            run_one(nm, base_trigger)
+        # 重试轮：只针对执行异常且还有剩余次数的账号
+        while True:
+            todo = [n for n in names if n in prog["results"]
+                    and is_exec_error(prog["results"][n])
+                    and prog["attempts"].get(n, 1) < max_attempts]
+            if not todo:
+                break
+            if not prog.get("retry_at"):
+                prog["retry_at"] = (now() + timedelta(minutes=RETRY_DELAY_MINUTES)).strftime("%Y-%m-%d %H:%M:%S")
+                save_schedule()
+            log.info("执行异常账号 %s 将于 %s 重试", "、".join(todo), prog["retry_at"])
+            _wait_until(datetime.strptime(prog["retry_at"], "%Y-%m-%d %H:%M:%S"))
+            for i, nm in enumerate(todo):
+                if i:
+                    time.sleep(ACCOUNT_INTERVAL)
+                run_one(nm, "定时重试%d" % prog["attempts"].get(nm, 1))
+            prog["retry_at"] = None
+            save_schedule()
     finally:
         # 无论成功与否都把该时间点标记为已执行，避免异常时同一时间点被反复触发
         scheduler_state["last_slot"] = slot_s
@@ -537,10 +589,12 @@ def _fire(slot: datetime):
         scheduler_state["last_run"] = prog["started"]
         scheduler_state["last_result"] = summary
         save_schedule()
-    save_log("%s汇总" % trigger, summary,
-             "计划时间 %s（UTC%+g）\n首次开始 %s\n本次开始 %s（延迟 %ss）\n\n%s" % (
+    tries = "\n".join("%s：共执行 %d 次" % (nm, n) for nm, n in prog["attempts"].items() if n > 1)
+    save_log("%s汇总" % base_trigger, summary,
+             "计划时间 %s（UTC%+g）\n首次开始 %s\n本次开始 %s（延迟 %ss）\n结束 %s\n\n%s%s" % (
                  slot_s, TZ_OFFSET, prog["started"],
-                 started.strftime("%Y-%m-%d %H:%M:%S"), delay, detail))
+                 started.strftime("%Y-%m-%d %H:%M:%S"), delay, now().strftime("%Y-%m-%d %H:%M:%S"),
+                 detail, ("\n\n重试情况：\n" + tries) if tries else ""))
 
 def scheduler_loop():
     while True:

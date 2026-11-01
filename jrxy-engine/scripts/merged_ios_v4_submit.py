@@ -425,6 +425,9 @@ def main():
             emit_result("already", msg)
         elif "没有未签到的任务" in msg:
             emit_result("no_task", msg)
+        elif "密码" in msg:
+            # 账号/密码错误不是偶发问题，判为失败，不触发重试（反复错误登录可能触发验证码/锁号）
+            emit_result("fail", "登录失败：%s" % msg)
         else:
             emit_result("error", "%s: %s" % (type(e).__name__, msg))
         raise
@@ -634,7 +637,11 @@ def _main():
             emit_result("fail", message or resp.text[:200])
         # 非版本过低即视为找到正确 key，停止继续
         return
-    emit_result("fail", "全部候选密钥均未成功（%s）" % (last_err or "无响应"))
+    if last_err.startswith("请求异常"):
+        # 网络问题（复查也确认没签上），判为执行异常以便定时重试
+        emit_result("error", "提交%s" % last_err)
+    else:
+        emit_result("fail", "全部候选密钥均未成功（%s）" % (last_err or "无响应"))
 
 
 if __name__ == "__main__":
