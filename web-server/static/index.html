@@ -186,8 +186,26 @@
   }
   .mask.show{display:flex}
   .modal{background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:26px 28px;width:min(400px,100%)}
+  .modal.wide{width:min(900px,96vw)}
+  .modal.mid{width:min(660px,94vw)}
+  .modal.maxh{max-height:92vh;overflow:auto}
   .modal h3{font-size:16px;margin-bottom:10px}
   .modal p{color:var(--muted);font-size:13px;margin-bottom:16px}
+  /* 照片池拖入区（仅本功能新增，沿用现有配色与圆角） */
+  .pool-drop{
+    border:1.5px dashed var(--line2);border-radius:12px;padding:20px 16px;text-align:center;
+    background:rgba(255,255,255,.02);cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .pool-drop:hover{border-color:var(--info);background:rgba(56,189,248,.05)}
+  .pool-drop.dragover{border-color:var(--ac1);background:rgba(20,184,166,.10)}
+  .pool-drop-icon{color:var(--muted);line-height:0;margin-bottom:6px}
+  .pool-drop.dragover .pool-drop-icon{color:var(--ac1)}
+  .pool-drop-text{font-size:13px;color:var(--text)}
+  .pool-link{color:var(--info);text-decoration:underline}
+  .pool-drop-hint{font-size:11px;color:var(--faint);margin-top:4px}
+  /* 独立定时表：窄屏不压缩列，改为横向滚动（仅本功能新增表） */
+  .per-acct-tbl{min-width:640px}
   .spinner{
     display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);
     border-top-color:var(--text);border-radius:50%;animation:spin .8s linear infinite;
@@ -252,7 +270,7 @@
     </div>
     <div class="tbl-scroll">
       <table>
-        <thead><tr><th>名称</th><th>学校</th><th>账号</th><th>类型</th><th>坐标</th><th>deviceId</th><th style="width:210px">操作</th></tr></thead>
+        <thead><tr><th>名称</th><th>学校</th><th>账号</th><th>类型</th><th>坐标</th><th>独立定时</th><th>照片</th><th>deviceId</th><th style="width:210px">操作</th></tr></thead>
         <tbody id="accountBody"><tr><td colspan="7" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
       </table>
     </div>
@@ -270,7 +288,7 @@
   </div>
 
   <div class="panel">
-    <h2><span class="hico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.2V12l3.4 2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span>内置定时（每天批量签到全部账号） <span class="tag">服务器部署时的自足定时器</span></h2>
+    <h2><span class="hico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.2V12l3.4 2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span>内置定时 <span class="tag">服务器部署时的自足定时器</span></h2>
     <div class="row">
       <div class="field"><label>启用定时</label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -280,6 +298,26 @@
       <div class="field"><label>每日签到时间（HH:MM）</label><input type="time" id="inTime"></div>
       <button class="primary" onclick="saveSchedule()">保存定时</button>
       <span class="tag" id="nextRun"></span>
+    </div>
+    <div class="row" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)">
+      <div class="field" style="flex:1 1 100%">
+        <label>为每个账号开启分别定时</label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--muted);font-size:13px">
+          <input type="checkbox" id="inPerAcct" style="width:16px;height:16px" onchange="togglePerAcctPanel()">
+          勾选后，可对账号列表中的账号分别设置独立的签到时间（未开启的账号仍跟随上方全局时间）
+        </label>
+      </div>
+    </div>
+    <div id="perAcctPanel" style="display:none;margin-top:12px">
+      <div class="tbl-scroll">
+        <table class="per-acct-tbl">
+          <thead><tr><th style="width:180px">账号</th><th style="width:130px">独立定时</th><th style="width:200px">时间（HH:MM）</th><th>下次执行</th><th style="width:140px">操作</th></tr></thead>
+          <tbody id="perAcctBody"><tr><td colspan="5" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="tag">提示：勾选「独立定时」并填好时间后，该账号不再参与上方全局批量签到，改为按自己的时间单独签到</span>
+      </div>
     </div>
   </div>
 
@@ -353,6 +391,12 @@
           <div class="field"><label>定位地址文本</label><input type="text" id="mAddr" placeholder="签到点地址"></div>
           <button class="primary" onclick="signRangeAcc()">从服务器获取签到范围</button>
         </div>
+        <div class="row" style="align-items:center">
+          <button class="ghost small" type="button" onclick="openMapPicker()">地图选点</button>
+          <button class="ghost small" type="button" onclick="useMyLocation()">用浏览器定位</button>
+          <button class="ghost small" type="button" onclick="openAmapConfig()">高德 Key 配置</button>
+          <span class="tag" id="mMapState">地图选点：未启用（需配置高德 Key）</span>
+        </div>
         <div class="row"><span class="tag" id="mRangeState"></span></div>
       </div>
 
@@ -360,13 +404,6 @@
       <div class="am-group">
         <div class="row">
           <div class="field"><label>异常原因（无则留空）</label><input type="text" id="mAbn" placeholder="如 信号异常"></div>
-          <div class="field"><label>签到照片（可选）</label>
-            <div style="display:flex;gap:8px">
-              <input type="text" id="mPhoto" placeholder="选择或输入文件名，如 daka.jpg" style="flex:1">
-              <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
-              <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
-            </div>
-          </div>
           <div class="field"><label>表单标题校验</label>
             <select id="mTitle">
               <option value="0">0 不校验</option>
@@ -380,7 +417,23 @@
             </select>
           </div>
         </div>
-        <div class="row">
+        <div class="row" style="margin-top:12px">
+          <div class="field" style="flex:1 1 100%"><label>签到照片（可选）</label>
+            <div style="display:flex;gap:8px">
+              <input type="text" id="mPhoto" placeholder="选择或输入文件名，如 daka.jpg" style="flex:1">
+              <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
+              <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px">
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;margin:0;font-size:12px;color:var(--muted);font-weight:400">
+                <input type="checkbox" id="mPhotoRandom" style="width:14px;height:14px;margin:0">
+                从照片池中随机选择照片
+              </label>
+              <span class="hint" id="mPoolHint" style="margin:0">照片池：加载中…</span>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
           <div class="field" style="flex:1 1 100%"><label>Server酱 SendKey（SCT开头）或完整推送地址</label><input type="text" id="mNotifyRcv" placeholder="如 SCTxxxx 或 https://sctapi.ftqq.com/SCTxxxx.send"></div>
         </div>
       </div>
@@ -404,6 +457,88 @@
       <button class="primary" onclick="saveAccount()">保存账号</button>
       <button class="ghost" onclick="closeAccountModal()">取消</button>
       <span class="hint" id="amFootHint"></span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="poolMask">
+  <div class="modal mid maxh">
+    <h3 id="poolTitle">照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
+    <p class="tag" style="margin-bottom:12px" id="poolDesc">每个账号有独立的照片池，只对该账号生效。支持拖入或点选上传，可一次多张；同名文件会覆盖。</p>
+    <div class="pool-drop" id="poolDrop">
+      <div class="pool-drop-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div class="pool-drop-text">把照片拖到这里，或 <span class="pool-link">点击选择</span></div>
+      <div class="pool-drop-hint">支持 jpg / png / webp / gif，单张不超过 5MB</div>
+      <input type="file" id="poolFile" accept="image/*" multiple style="display:none">
+    </div>
+    <div class="tbl-scroll" style="max-height:300px;margin-top:12px">
+      <table>
+        <thead><tr><th>预览</th><th>文件名</th><th>操作</th></tr></thead>
+        <tbody id="poolBody"><tr><td colspan="3" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick="el('poolFile').click()">＋ 添加照片</button>
+      <button class="ghost" onclick="closePoolModal()">关闭</button>
+      <span class="tag" id="poolCountHint"></span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="mapMask">
+  <div class="modal wide maxh">
+    <h3>地图选点 <span class="tag" style="margin-left:8px">点击地图或拖动标记选择签到点</span></h3>
+    <div class="row" style="margin:10px 0">
+      <div class="field" style="flex:1 1 260px">
+        <label>搜索地点</label>
+        <input type="text" id="mapSearch" placeholder="输入地点名称，如 大连大学北区，回车搜索">
+      </div>
+      <button class="ghost small" type="button" onclick="mapSearchPlace()">搜索</button>
+      <button class="ghost small" type="button" onclick="mapUseMyLocation()">用我的位置</button>
+      <span class="tag" id="mapTip"></span>
+    </div>
+    <div id="mapContainer" style="width:100%;height:420px;border-radius:10px;border:1px solid var(--line);background:#0b1220;overflow:hidden"></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>经度 lon（GCJ-02）</label><input type="text" id="mapLon" readonly style="background:var(--card2)"></div>
+      <div class="field"><label>纬度 lat（GCJ-02）</label><input type="text" id="mapLat" readonly style="background:var(--card2)"></div>
+      <div class="field" style="flex:1 1 240px"><label>地址（可编辑）</label><input type="text" id="mapAddr" placeholder="自动获取或手动填写"></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button class="primary" onclick="applyMapPick()">使用此坐标</button>
+      <button class="ghost" onclick="closeMapPicker()">取消</button>
+      <span class="tag" id="mapCoordTip">提示：高德地图返回的坐标即为 GCJ-02，与今日校园一致</span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="amapCfgMask">
+  <div class="modal mid maxh">
+    <h3>高德地图 Key 配置</h3>
+    <p class="tag" style="margin:8px 0 14px">
+      前往 <a href="https://console.amap.com/dev/key" target="_blank" rel="noopener">高德开放平台控制台</a>
+      创建应用，添加 <b>Web端(JS API)</b> 类型的 Key 得到「Key」与「安全密钥」；
+      如需自动填充地址，再添加一个 <b>Web服务</b> 类型的 Key。不填则只能手动输入经纬度。
+    </p>
+    <div class="field" style="margin-bottom:12px">
+      <label>JS API Key（Web端）</label>
+      <input type="text" id="amapKey" placeholder="留空 = 不启用地图选点" autocomplete="off">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label>安全密钥 securityJsCode</label>
+      <input type="text" id="amapSec" placeholder="2021-12-02 之后申请的 Key 必须填写" autocomplete="off">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label>Web 服务 Key（可选，用于自动获取地址）</label>
+      <input type="password" id="amapWeb" placeholder="留空 = 不自动获取地址（不影响选点）" autocomplete="off">
+    </div>
+    <div class="row">
+      <button class="primary" onclick="saveAmapCfg()">保存</button>
+      <button class="ghost" onclick="closeAmapConfig()">取消</button>
+      <span class="tag" id="amapCfgState"></span>
     </div>
   </div>
 </div>
@@ -456,11 +591,13 @@ function coordText(a){
 
 /* ================= 状态 ================= */
 function renderStatus(s){
+  window.__status = s;
   el("cPlatform").textContent = s.platform + (s.engine_ready ? "" : "（引擎缺失）");
   el("cCount").textContent = s.account_count;
-  el("cSched").textContent = s.scheduler.enabled
+  const perCount = s.per_account_schedules ? Object.keys(s.per_account_schedules).length : 0;
+  el("cSched").textContent = (s.scheduler.enabled
     ? (s.scheduler.time + " 启用" + (s.scheduler.next ? " · 下次 " + s.scheduler.next : ""))
-    : "已停用";
+    : "已停用") + (perCount ? (" · 独立定时 " + perCount + " 个") : "");
   el("cTime").textContent = s.server_time + (s.timezone ? " " + s.timezone : "")
     + (s.system_time && s.system_time.slice(0, 16) !== s.server_time.slice(0, 16) ? "（系统时钟 " + s.system_time + "）" : "");
   el("inAuto").checked = s.scheduler.enabled;
@@ -471,6 +608,17 @@ function renderStatus(s){
   el("engineText").textContent = s.engine_ready ? (s.platform + " · " + st) : "引擎环境缺失！请先部署引擎 venv";
   el("engineDot").className = "dot " + (s.engine_ready ? "on" : "off");
   el("platformBadge").title = "账号目录 " + s.accounts_dir + " · 服务器时间 " + s.server_time;
+  // 照片池数量（供账号弹窗提示用）
+  if (s.photo_pool){
+    window.__poolCount = s.photo_pool.count;
+    if (typeof updatePoolHint === "function") updatePoolHint();
+  }
+  // 逐账号定时面板：任账号开启了独立定时就自动展开
+  if (perCount && el("perAcctPanel")){
+    el("inPerAcct").checked = true;
+    el("perAcctPanel").style.display = "";
+    renderPerAcct();
+  }
 }
 
 /* ================= 账号列表 ================= */
@@ -487,16 +635,25 @@ async function loadAccounts(){
 }
 function renderAccounts(list){
   const b = el("accountBody");
-  if (!list.length){ b.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">暂无账号，点击右上角「新增账号」创建</td></tr>'; return; }
+  if (!list.length){ b.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">暂无账号，点击右上角「新增账号」创建</td></tr>'; return; }
   b.innerHTML = list.map(a=>{
     const dev = a.device_id && !a.device_id.includes("未设置") ? a.device_id : '<span style="color:var(--warn)">未设置</span>';
-    const passCls = a.password_set ? 'ok' : 'bad';
+    const sched = a.schedule_enabled
+      ? '<span class="pill ok">' + esc(a.schedule_time || '-') + '</span>'
+      : '<span style="color:var(--faint)">跟随全局</span>';
+    const pc = a.pool_count || 0;
+    const photo = a.photo_random
+      ? ('<span class="pill ok" title="本账号照片池共 ' + pc + ' 张">随机 ' + pc + ' 张</span>')
+      : (a.photo ? '<span title="' + esc(a.photo) + '">固定</span>'
+                 : '<span style="color:var(--faint)">' + (pc ? ("池 " + pc + " 张") : "-") + '</span>');
     return `<tr>
       <td><b>${esc(a.name)}</b>${a.password_set ? '' : '<br><span style="color:var(--warn);font-size:11px">未设密码</span>'}</td>
       <td>${esc(a.school || "-")}</td>
       <td class="mono">${esc(a.username || "-")}</td>
       <td>${TYPE_MAP[a.type] ?? ("type=" + a.type)}</td>
       <td class="mono">${coordText(a)}</td>
+      <td>${sched}</td>
+      <td>${photo}</td>
       <td class="mono" title="${esc(a.device_id || '')}">${dev}</td>
       <td>
         <button class="ghost small" onclick="openAccountModal('${esc(a.name)}')">编辑</button>
@@ -513,6 +670,11 @@ async function openAccountModal(name){
   editingName = name || "";
   const fields = ["mName","mSchool","mType","mUser","mPass","mProxy","mLon","mLat","mAddr","mAbn","mPhoto","mTitle","mDev","mNotifyMethod","mNotifyRcv"];
   fields.forEach(f => el(f).value = "");
+  el("mPhotoRandom").checked = false;
+  // 先按当前账号加载照片池，再更新提示，避免显示上一个账号的缓存张数
+  poolCache = [];
+  loadPhotoPool().then(()=>{ updatePoolHint(); });
+  updatePoolHint();
   el("mLoginState").className = "pill def"; el("mLoginState").textContent = "未测试";
   el("mRangeState").textContent = ""; el("amHint").textContent = "";
   if (editingName){
@@ -531,6 +693,7 @@ async function openAccountModal(name){
       el("mAddr").value = d.address || "";
       el("mAbn").value = d.abnormalReason || "";
       el("mPhoto").value = d.photo || "";
+      el("mPhotoRandom").checked = !!d.photoRandom;
       el("mTitle").value = String(d.checkTitle || 0);
       el("mDev").value = d.device_id || "";
       el("mDev").placeholder = "留空 = 沿用当前 deviceId（勿改）";
@@ -553,6 +716,7 @@ async function openAccountModal(name){
     el("mDev").placeholder = "留空=首次运行自动生成（仅限未绑定新账号）；迁移请粘贴原 deviceId";
     el("amFootHint").textContent = "新建必须填写：账号名 / 学校 / 学号 / 密码";  }
   el("accountMask").classList.add("show");
+  if (typeof refreshMapState === "function") refreshMapState();
   if (!editingName) setTimeout(()=>el("mName").focus(), 60);
 }
 function closeAccountModal(){ el("accountMask").classList.remove("show"); }
@@ -569,6 +733,7 @@ function collectAccount(){
     address: el("mAddr").value.trim(),
     abnormalReason: el("mAbn").value.trim(),
     photo: el("mPhoto").value.trim(),
+    photoRandom: el("mPhotoRandom").checked ? 1 : 0,
     checkTitle: el("mTitle").value,
     notifyMethod: el("mNotifyMethod").value,
     notifyRcv: el("mNotifyRcv").value.trim(),
@@ -727,13 +892,385 @@ async function uploadPhotoAcc(ev){
   finally{ fi.value = ""; }
 }
 
+/* ================= 高德地图选点 ================= */
+let mapObj = null, mapMarker = null, mapInited = false, mapPicked = null;
+
+async function loadAmapCfg(){
+  try{ return await api("/api/amap-config"); }
+  catch(e){ return {enabled:false, key:"", securityJsCode:""}; }
+}
+function setMapState(text, ok){
+  const t = el("mMapState");
+  if (t){ t.textContent = text; t.style.color = ok ? "var(--ac2)" : ""; }
+}
+async function refreshMapState(){
+  const c = await loadAmapCfg();
+  window.__amap = c;
+  setMapState(c.enabled ? "地图选点：已启用" : "地图选点：未启用（需配置高德 Key）", c.enabled);
+  return c;
+}
+function openAmapConfig(){
+  el("amapCfgMask").classList.add("show");
+  loadAmapCfg().then(c=>{
+    el("amapKey").value = c.key || "";
+    el("amapSec").value = c.securityJsCode || "";
+    el("amapWeb").value = "";
+    el("amapWeb").placeholder = c.webKey_set ? "已设置（留空保持不变）" : "留空 = 不自动获取地址";
+    el("amapCfgState").textContent = c.enabled ? "当前：已启用" : "当前：未启用";
+  });
+}
+function closeAmapConfig(){ el("amapCfgMask").classList.remove("show"); }
+async function saveAmapCfg(){
+  const body = {
+    key: el("amapKey").value.trim(),
+    securityJsCode: el("amapSec").value.trim()
+  };
+  const web = el("amapWeb").value.trim();
+  if (web) body.webKey = web;      // 留空则不改动原有 Web 服务 Key
+  try{
+    const r = await api("/api/amap-config", {method:"POST", body:JSON.stringify(body)});
+    toast(r.enabled ? "已保存，地图选点已启用" : "已保存（Key 为空，地图选点未启用）", "ok");
+    closeAmapConfig();
+    mapInited = false;             // 配置变更后强制重新加载地图
+    refreshMapState();
+    refreshStatus();
+  }catch(e){ toast("保存失败：" + e.message, "bad"); }
+}
+/* 动态加载高德 JS API 2.0（Loader 方式，符合官方要求） */
+function loadAmapSdk(cfg){
+  return new Promise((resolve, reject)=>{
+    if (window.AMap){ resolve(window.AMap); return; }
+    if (!cfg.key){ reject(new Error("未配置高德 Key")); return; }
+    // 安全密钥必须在加载前设置
+    window._AMapSecurityConfig = { securityJsCode: cfg.securityJsCode || "" };
+    const finish = ()=>{
+      if (!window.AMapLoader){ reject(new Error("高德 Loader 加载失败")); return; }
+      AMapLoader.load({
+        key: cfg.key,
+        version: "2.0",
+        plugins: ["AMap.Scale","AMap.ToolBar","AMap.Geocoder","AMap.Geolocation"]
+      }).then(AMap => resolve(AMap)).catch(e => reject(e));
+    };
+    if (window.AMapLoader){ finish(); return; }
+    const s = document.createElement("script");
+    s.src = "https://webapi.amap.com/loader.js";
+    s.onload = finish;
+    s.onerror = ()=> reject(new Error("无法加载高德地图脚本，请检查网络"));
+    document.head.appendChild(s);
+  });
+}
+async function openMapPicker(){
+  const cfg = window.__amap || await loadAmapCfg();
+  if (!cfg.enabled){
+    toast("尚未配置高德 Key，先配置后再用地图选点", "bad");
+    openAmapConfig();
+    return;
+  }
+  el("mapMask").classList.add("show");
+  el("mapTip").textContent = "正在加载地图…";
+  // 预填当前账号已有坐标
+  const curLon = parseFloat(el("mLon").value), curLat = parseFloat(el("mLat").value);
+  try{
+    const AMap = await loadAmapSdk(cfg);
+    el("mapTip").textContent = "";
+    initMap(AMap, curLon, curLat);
+  }catch(e){
+    el("mapTip").textContent = "地图加载失败：" + e.message;
+    toast("地图加载失败：" + e.message, "bad");
+  }
+}
+function closeMapPicker(){ el("mapMask").classList.remove("show"); }
+
+function initMap(AMap, lon, lat){
+  const hasCoord = !isNaN(lon) && !isNaN(lat);
+  // 没有坐标时默认落在大连（可按需改）
+  const center = hasCoord ? [lon, lat] : [121.6147, 38.9140];
+  if (!mapInited){
+    mapObj = new AMap.Map("mapContainer", {
+      zoom: hasCoord ? 17 : 12,
+      center: center,
+      viewMode: "2D"
+    });
+    mapObj.addControl(new AMap.Scale());
+    // 点击地图选点
+    mapObj.on("click", e => setMapMarker(AMap, e.lnglat.getLng(), e.lnglat.getLat(), true));
+    mapInited = true;
+  } else {
+    mapObj.setZoomAndCenter(hasCoord ? 17 : 12, center);
+  }
+  if (hasCoord){
+    setMapMarker(AMap, lon, lat, false);
+  } else {
+    el("mapLon").value = "";
+    el("mapLat").value = "";
+    el("mapAddr").value = "";
+    mapPicked = null;
+  }
+  // 容器在弹窗内，显示后需要触发一次 resize
+  setTimeout(()=>{ try{ mapObj.resize(); }catch(e){} }, 120);
+}
+function setMapMarker(AMap, lon, lat, doGeocode){
+  const pos = [lon, lat];
+  if (!mapMarker){
+    mapMarker = new AMap.Marker({ position: pos, draggable: true, cursor: "move" });
+    mapMarker.on("dragend", e=>{
+      const p = e.target.getPosition();
+      setMapMarker(window.AMap, p.getLng(), p.getLat(), true);
+    });
+    mapObj.add(mapMarker);
+  } else {
+    mapMarker.setPosition(pos);
+  }
+  mapPicked = {lon, lat};
+  el("mapLon").value = Number(lon).toFixed(6);
+  el("mapLat").value = Number(lat).toFixed(6);
+  el("mapTip").textContent = "已选点，可拖动标记微调";
+  if (doGeocode) reverseGeocode(lon, lat);
+}
+async function reverseGeocode(lon, lat){
+  el("mapAddr").placeholder = "正在获取地址…";
+  try{
+    const r = await api("/api/amap/regeo", {method:"POST", body:JSON.stringify({lon, lat})});
+    if (r.ok && r.address){
+      el("mapAddr").value = r.address;
+      el("mapCoordTip").textContent = "地址已自动填充（高德逆地理编码）";
+    } else {
+      el("mapCoordTip").textContent = r.error || "未能获取地址，可手动填写";
+    }
+  }catch(e){
+    el("mapCoordTip").textContent = "获取地址失败：" + e.message + "（可手动填写）";
+  }finally{
+    el("mapAddr").placeholder = "自动获取或手动填写";
+  }
+}
+async function mapSearchPlace(){
+  const kw = el("mapSearch").value.trim();
+  if (!kw){ toast("请输入要搜索的地点", "bad"); return; }
+  const cfg = window.__amap || await loadAmapCfg();
+  if (!cfg.enabled){ toast("未配置高德 Key", "bad"); return; }
+  try{
+    const AMap = await loadAmapSdk(cfg);
+    const ps = new AMap.PlaceSearch({ pageSize: 1 });
+    el("mapTip").textContent = "搜索中…";
+    ps.search(kw, (status, result)=>{
+      const pois = (result && result.poiList && result.poiList.pois) || [];
+      if (status === "complete" && pois.length){
+        const p = pois[0];
+        el("mapAddr").value = p.name + (p.address ? ("（" + p.address + "）") : "");
+        el("mapCoordTip").textContent = "已定位到：" + p.name;
+        mapObj.setZoomAndCenter(17, [p.location.lng, p.location.lat]);
+        setMapMarker(AMap, p.location.lng, p.location.lat, false);
+        el("mapTip").textContent = "找到 1 个结果";
+      } else {
+        el("mapTip").textContent = "未找到该地点，请换个关键词";
+      }
+    });
+  }catch(e){ toast("搜索失败：" + e.message, "bad"); }
+}
+function mapUseMyLocation(){
+  if (!navigator.geolocation){ toast("浏览器不支持定位", "bad"); return; }
+  el("mapTip").textContent = "正在获取浏览器定位…";
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const {longitude, latitude} = pos.coords;
+      // 浏览器给的是 WGS-84，高德需要 GCJ-02，用高德转换
+      if (mapObj && window.AMap && AMap.convertFrom){
+        AMap.convertFrom([longitude, latitude], "gps", (status, result)=>{
+          if (status === "complete" && result.locations && result.locations.length){
+            const p = result.locations[0];
+            mapObj.setZoomAndCenter(17, [p.lng, p.lat]);
+            setMapMarker(AMap, p.lng, p.lat, true);
+          } else {
+            mapObj.setZoomAndCenter(17, [longitude, latitude]);
+            setMapMarker(AMap, longitude, latitude, true);
+          }
+        });
+      } else if (mapObj){
+        mapObj.setZoomAndCenter(17, [longitude, latitude]);
+        setMapMarker(window.AMap, longitude, latitude, true);
+      }
+    },
+    err => { el("mapTip").textContent = "定位失败：" + err.message; },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+/* 账号弹窗里的“用浏览器定位”：不走地图，直接把坐标填进输入框 */
+function useMyLocation(){
+  if (!navigator.geolocation){ toast("浏览器不支持定位", "bad"); return; }
+  toast("正在获取定位…", "ok");
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lon = pos.coords.longitude, lat = pos.coords.latitude;
+      el("mLon").value = lon.toFixed(6);
+      el("mLat").value = lat.toFixed(6);
+      toast("已填入坐标。注意：浏览器返回 WGS-84，如需精确请用「地图选点」转换", "ok");
+    },
+    err => toast("定位失败：" + err.message, "bad"),
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+function applyMapPick(){
+  if (!mapPicked){ toast("请先在地图上点选一个位置", "bad"); return; }
+  el("mLon").value = Number(mapPicked.lon).toFixed(6);
+  el("mLat").value = Number(mapPicked.lat).toFixed(6);
+  const addr = el("mapAddr").value.trim();
+  if (addr) el("mAddr").value = addr;
+  toast("已应用坐标：" + el("mLon").value + ", " + el("mLat").value, "ok");
+  closeMapPicker();
+}
+
 /* ================= 定时 ================= */
 async function saveSchedule(){
   try{
     await api("/api/schedule", {method:"POST", body:JSON.stringify({
       enabled: el("inAuto").checked, time: el("inTime").value
     })});
-    toast("定时设置已保存", "ok");
+    toast("全局定时设置已保存", "ok");
+    refreshStatus();
+  }catch(e){ toast("保存失败：" + e.message, "bad"); }
+}
+
+/* ================= 照片池 ================= */
+let poolCache = [];
+/* 当前照片池所属账号：空字符串表示共享池（仅在未选中账号时使用） */
+function poolAccount(){
+  return (typeof editingName === "string" && editingName) ? editingName : "";
+}
+function poolQS(){
+  const a = poolAccount();
+  return a ? ("?account=" + encodeURIComponent(a)) : "";
+}
+async function loadPhotoPool(){
+  try{
+    const r = await api("/api/photo-pool" + poolQS());
+    poolCache = r.photos || [];
+    return poolCache;
+  }catch(e){ poolCache = []; return []; }
+}
+function updatePoolHint(){
+  const n = (poolCache && poolCache.length) ? poolCache.length : 0;
+  const box = el("mPoolHint");
+  if (!box) return;
+  const acc = poolAccount();
+  if (!acc){
+    box.innerHTML = '请先保存账号，再为该账号配置照片池';
+    return;
+  }
+  box.innerHTML = n
+    ? ('本账号照片池共 <b>' + n + '</b> 张 · <a href="#" onclick="openPoolModal();return false">管理照片池</a>')
+    : ('本账号照片池为空 · <a href="#" onclick="openPoolModal();return false">去添加照片</a>');
+}
+async function uploadPoolFiles(fileList){
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  let ok = 0, fail = 0;
+  for (const f of files){
+    if (f.size > 5 * 1024 * 1024){ toast(f.name + " 超过 5MB，已跳过", "bad"); fail++; continue; }
+    const ext = (f.name.split(".").pop() || "").toLowerCase();
+    if (!["jpg","jpeg","png","webp","gif"].includes(ext)){ toast(f.name + " 格式不支持，已跳过", "bad"); fail++; continue; }
+    try{
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error("读取失败"));
+        r.readAsDataURL(f);
+      });
+      await api("/api/photo-pool" + poolQS(), {method:"POST", body:JSON.stringify({name: f.name, data})});
+      ok++;
+    }catch(e){ fail++; }
+  }
+  await loadPhotoPool();
+  renderPool();
+  updatePoolHint();
+  toast("照片池：成功 " + ok + " 张" + (fail ? ("，失败 " + fail + " 张") : ""), ok ? "ok" : "bad");
+}
+async function uploadPoolPhotos(ev){
+  const fi = ev.target;
+  await uploadPoolFiles(fi.files);
+  fi.value = "";
+}
+function openPoolModal(){
+  const acc = poolAccount();
+  const title = el("poolTitle");
+  if (title){
+    title.innerHTML = acc
+      ? ('照片池 · <b style="color:var(--info)">' + esc(acc) + '</b> <span class="tag" style="margin-left:8px">该池只对此账号生效</span>')
+      : '照片池 <span class="tag" style="margin-left:8px">未选择账号</span>';
+  }
+  const desc = el("poolDesc");
+  if (desc){
+    desc.textContent = acc
+      ? '当前为「' + acc + '」的专属照片池，其他账号不受影响。支持拖入或点选上传，可一次多张；同名文件会覆盖。'
+      : '请先在账号编辑窗中保存账号，再为该账号配置照片池。';
+  }
+  el("poolMask").classList.add("show");
+  loadPhotoPool().then(()=>{ renderPool(); });
+}
+function closePoolModal(){ el("poolMask").classList.remove("show"); }
+function renderPool(){
+  const b = el("poolBody");
+  const cnt = el("poolCountHint");
+  if (cnt) cnt.textContent = "当前共 " + poolCache.length + " 张";
+  if (!poolCache.length){
+    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">该账号的照片池为空，点击下方「添加照片」上传多张候选照片</td></tr>';
+    return;
+  }
+  b.innerHTML = poolCache.map(p=>`<tr>
+    <td style="width:90px"><img src="${p.url}" alt="" style="width:64px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--line)"></td>
+    <td class="mono">${esc(p.name)}</td>
+    <td style="width:90px"><button class="danger small" onclick="deletePoolPhoto('${esc(p.name)}')">移除</button></td>
+  </tr>`).join("");
+}
+async function deletePoolPhoto(name){
+  if (!confirm("确定从照片池移除「" + name + "」？")) return;
+  try{
+    await api("/api/photo-pool/" + encodeURIComponent(name) + poolQS(), {method:"DELETE"});
+    await loadPhotoPool(); renderPool(); updatePoolHint();
+    toast("已移除", "ok");
+  }catch(e){ toast("移除失败：" + e.message, "bad"); }
+}
+
+/* ================= 账号独立定时 ================= */
+let perAcctCache = [];
+function togglePerAcctPanel(){
+  const on = el("inPerAcct").checked;
+  el("perAcctPanel").style.display = on ? "" : "none";
+  if (on) renderPerAcct();
+}
+async function renderPerAcct(){
+  const b = el("perAcctBody");
+  try{
+    const r = await api("/api/accounts");
+    perAcctCache = r.accounts || [];
+  }catch(e){ perAcctCache = []; }
+  if (!perAcctCache.length){
+    b.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无账号</td></tr>';
+    return;
+  }
+  const nextMap = (window.__status && window.__status.per_account_schedules) || {};
+  b.innerHTML = perAcctCache.map(a=>{
+    const on = !!a.schedule_enabled;
+    const t = a.schedule_time || "";
+    return `<tr>
+      <td><b>${esc(a.name)}</b></td>
+      <td><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" style="width:15px;height:15px" ${on?"checked":""} onchange="savePerAcct('${esc(a.name)}', this.checked, '${esc(t)}')"> 独立定时</label></td>
+      <td><input type="time" value="${esc(t)}" style="width:100%;min-width:150px" onchange="savePerAcct('${esc(a.name)}', ${on}, this.value)"></td>
+      <td class="mono">${on && t ? esc(t) + ' 每天' : '<span style="color:var(--faint)">跟随全局</span>'}</td>
+      <td><button class="ghost small" onclick="savePerAcct('${esc(a.name)}', true, '${esc(t||'22:05')}')">启用</button>
+          <button class="ghost small" onclick="savePerAcct('${esc(a.name)}', false, '${esc(t)}')">停用</button></td>
+    </tr>`;
+  }).join("");
+}
+async function savePerAcct(name, enabled, time){
+  if (enabled && !time){ toast("请先填写该账号的签到时间", "bad"); return; }
+  try{
+    await api("/api/accounts/" + encodeURIComponent(name), {method:"POST", body:JSON.stringify({
+      scheduleEnabled: enabled ? 1 : 0,
+      scheduleTime: time || ""
+    })});
+    toast("账号「" + name + "」" + (enabled ? ("独立定时已开启：" + time) : "已跟随全局定时"), "ok");
+    await renderPerAcct();
     refreshStatus();
   }catch(e){ toast("保存失败：" + e.message, "bad"); }
 }
@@ -824,9 +1361,39 @@ function startClock(){
 }
 startClock();
 refreshAll();
-document.addEventListener("keydown", e=>{ if (e.key === "Escape") closeAccountModal(); });
+document.addEventListener("keydown", e=>{
+  if (e.key === "Escape"){ closeAccountModal(); closePoolModal(); closeMapPicker(); closeAmapConfig(); }
+});
 el("accountMask").addEventListener("click", e=>{ if (e.target === el("accountMask")) closeAccountModal(); });
+el("poolMask").addEventListener("click", e=>{ if (e.target === el("poolMask")) closePoolModal(); });
+el("mapMask").addEventListener("click", e=>{ if (e.target === el("mapMask")) closeMapPicker(); });
+el("amapCfgMask").addEventListener("click", e=>{ if (e.target === el("amapCfgMask")) closeAmapConfig(); });
 el("mPhotoFile").addEventListener("change", uploadPhotoAcc);
+el("poolFile").addEventListener("change", uploadPoolPhotos);
+/* 照片池拖入上传 */
+(function bindPoolDrop(){
+  const drop = el("poolDrop");
+  const input = el("poolFile");
+  if (!drop || !input) return;
+  drop.addEventListener("click", () => input.click());
+  let depth = 0;
+  const enter = e => { e.preventDefault(); e.stopPropagation(); depth++; drop.classList.add("dragover"); };
+  const leave = e => { e.preventDefault(); e.stopPropagation(); depth = Math.max(0, depth-1); if (!depth) drop.classList.remove("dragover"); };
+  ["dragenter"].forEach(t => drop.addEventListener(t, enter));
+  ["dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); e.stopPropagation(); }));
+  ["dragleave"].forEach(t => drop.addEventListener(t, leave));
+  ["drop"].forEach(t => drop.addEventListener(t, e => {
+    e.preventDefault(); e.stopPropagation();
+    depth = 0; drop.classList.remove("dragover");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) uploadPoolFiles(files);
+  }));
+  // 防止浏览器默认打开被拖入的文件
+  ["dragover","drop"].forEach(t => window.addEventListener(t, e => {
+    if (el("poolMask").classList.contains("show")) e.preventDefault();
+  }));
+})();
+el("mapSearch").addEventListener("keydown", e=>{ if (e.key === "Enter"){ e.preventDefault(); mapSearchPlace(); } });
 setInterval(()=>{ api("/api/status").then(renderStatus).catch(()=>{}); }, 60000);
 setInterval(()=>{ loadLogs(); }, 30000);
 </script>
