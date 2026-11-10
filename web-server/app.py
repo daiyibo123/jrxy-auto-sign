@@ -322,19 +322,51 @@ def pick_random_pool_photo(account: str = "") -> Optional[str]:
 
 def resolve_account_photo(user: dict, account: str = "") -> str:
     """决定本次运行实际使用的照片路径。
-    photoRandom=1 时从该账号照片池随机取（空了回退共享池）；
-    取不到任何池照片则用账号固定 photo。"""
+
+    引擎只在任务 isPhoto==1 时才读照片，但那个值要登录后才知道。
+    为避免「配置里没填照片 → 引擎拿到空串 → 拼成目录 → PermissionError」，
+    这里保证能取到就取到一张，取不到才返回空串（由调用方拦截并提示）。
+
+    优先级：账号照片池随机 → 账号固定 photo → 共享池兜底。
+    """
     try:
         use_random = int(user.get("photoRandom", 0) or 0) == 1
     except (TypeError, ValueError):
         use_random = False
+
+    fixed = str(user.get("photo", "") or "").strip()
+
     if use_random:
         picked = pick_random_pool_photo(account)
         if picked:
             return picked
-        log.warning("账号 %s 开启随机照片，但照片池为空，回退使用 %s",
-                    account or "(共享池)", user.get("photo") or "(未设置)")
-    return str(user.get("photo", "") or "")
+        log.warning("账号 %s 开启随机照片但池为空，回退固定照片 %s",
+                    account or "(共享池)", fixed or "(未设置)")
+        if fixed:
+            return fixed
+    else:
+        if fixed:
+            return fixed
+        # 没填固定照片：从该账号池兜底挑一张
+        picked = pick_random_pool_photo(account)
+        if picked:
+            log.info("账号 %s 未配置固定照片，自动使用照片池中的图片", account or "(共享池)")
+            return picked
+
+    return ""
+
+def resolve_photo_for_run(user: dict, account: str = "") -> str:
+    """运行前解析照片；池全空时再尝试共享池兜底，尽量避免空串进引擎。"""
+    photo = resolve_account_photo(user, account)
+    if photo:
+        return photo
+    legacy = list_pool_photos("")
+    if legacy and account:
+        log.info("账号 %s 各处都没有照片，使用共享池兜底", account)
+        return "../web-server/data/photo_pool/%s" % random.choice(legacy)
+    if legacy and not account:
+        return "../web-server/data/photo_pool/%s" % random.choice(legacy)
+    return ""
 
 def validate_photo_path(photo: str) -> Optional[str]:
     """校验 photo 是否为可用的图片文件。
@@ -530,41 +562,38 @@ def run_account(name: str, dry: bool) -> str:
         did = ensure_device_id(name)
     except HTTPException as e:
         return str(e.detail)
-    # 开启“照片池随机”时，从该账号自己的照片池随机取一张，
-    # 写进临时配置副本，避免污染 accounts/*.yml
+    # 运行前解析照片：只要池里有图就写进临时配置副本，
+    # 避免「配置里没填照片 → 引擎拿到空串 → 拼成目录 → PermissionError」。
+    # 临时副本不改动 accounts/*.yml。
     conf_path = str(yml)
+    eff_photo = ""
     try:
         user, _ = read_account(name)
-        if int(user.get("photoRandom", 0) or 0) == 1:
-            picked = resolve_account_photo(user, name)
-            if picked and picked != str(user.get("photo", "") or ""):
-                tmp_conf = write_temp_account(name, user, picked)
-                conf_path = tmp_conf
-                log.info("账号 %s 使用照片池随机照片: %s", name, picked)
+        eff_photo = resolve_photo_for_run(user, name)
+        if eff_photo and eff_photo != str(user.get("photo", "") or ""):
+            tmp_conf = write_temp_account(name, user, eff_photo)
+            conf_path = tmp_conf
+            log.info("账号 %s 本次使用照片: %s", name, eff_photo)
+        elif eff_photo:
+            eff_photo = str(user.get("photo", "") or "")
     except Exception as e:
-        log.warning("准备随机照片失败，回退原配置: %s", e)
+        log.warning("准备照片失败，回退原配置: %s", e)
 
-    # 提前校验照片：引擎拿到空串/目录会抛 PermissionError，这里给出可读提示。
-    # 仅在该账号确实会用到照片时才拦截（勾了随机，或已配置 photo）。
+    # 校验：引擎拿到空串/目录会抛 PermissionError，这里提前给出可读提示。
+    # 只要没有任何可用照片就拦截——因为无法预知任务 isPhoto 是否为 1。
     try:
-        chk_user, _ = read_account(name)
-        eff_photo = chk_user.get("photo", "") or ""
-        wants_photo = bool(int(chk_user.get("photoRandom", 0) or 0)) or bool(eff_photo)
-        if conf_path != str(yml):
-            # 已写入临时配置，以临时配置里的照片路径为准
-            for line in Path(conf_path).read_text(encoding="utf-8").splitlines():
-                if line.strip().startswith("photo:"):
-                    eff_photo = line.split(":", 1)[1].strip().strip("'\"")
-                    break
-        if wants_photo:
-            err = validate_photo_path(eff_photo)
-            if err:
-                msg = ("签到需要照片，但当前照片不可用：%s\n\n"
-                       "处理办法：编辑账号 → 签到照片 → 点「管理照片池」上传照片，"
-                       "或取消「从照片池中随机选择照片」后直接指定文件名。") % err
-                log.warning("账号 %s 照片校验未通过：%s", name, err)
-                return "###RESULT###" + json.dumps(
-                    {"status": "error", "msg": msg}, ensure_ascii=False) + "\n" + msg
+        if not eff_photo:
+            chk_user, _ = read_account(name)
+            eff_photo = str(chk_user.get("photo", "") or "")
+        err = validate_photo_path(eff_photo)
+        if err:
+            msg = ("当前没有可用的签到照片：%s\n\n"
+                   "本任务可能需要上传照片，若直接执行会失败。\n"
+                   "处理办法：编辑账号 → 签到照片 → 点「管理照片池」上传至少一张照片。"
+                   ) % err
+            log.warning("账号 %s 照片校验未通过：%s", name, err)
+            return "###RESULT###" + json.dumps(
+                {"status": "error", "msg": msg}, ensure_ascii=False) + "\n" + msg
     except Exception as e:
         log.warning("照片校验异常（忽略，继续执行）: %s", e)
 
