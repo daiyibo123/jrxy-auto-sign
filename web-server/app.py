@@ -77,6 +77,7 @@ PHOTO_POOL_DIR.mkdir(parents=True, exist_ok=True)
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 # 高德地图配置：保存 JS API Key 与安全密钥（留空则不启用地图选点）
 AMAP_CONF_PATH = DATA_DIR / "amap.json"
+_amap_cache = None      # {"_mtime": float, "conf": dict}，按文件 mtime 缓存
 
 IS_WIN = os.name == "nt"
 ENGINE_PY = ENGINE_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
@@ -240,6 +241,23 @@ def write_temp_account(name: str, user: dict, photo_override: str) -> str:
     tmp.write_text(dump_account(tmp_user, proxy), encoding="utf-8")
     return str(tmp)
 
+def cleanup_stale_temp_accounts():
+    """清理上次运行残留的临时配置（进程被强杀时 finally 不会执行）。
+    只删 _tmp- 开头的 .yml，不碰真实账号。"""
+    if not ACCOUNTS_DIR.is_dir():
+        return 0
+    n = 0
+    for f in os.listdir(ACCOUNTS_DIR):
+        if f.startswith("_tmp-") and f.endswith(".yml"):
+            try:
+                (ACCOUNTS_DIR / f).unlink()
+                n += 1
+            except OSError:
+                pass
+    if n:
+        log.info("清理残留临时配置 %d 个", n)
+    return n
+
 def mask_username(name: str) -> str:
     if not name:
         return ""
@@ -284,9 +302,18 @@ def resolve_account_photo(user: dict) -> str:
 # ---------------- 高德地图配置 ----------------
 def load_amap_conf() -> dict:
     """读取高德配置。key/securityJsCode 留空表示未启用地图选点。
-    也支持用环境变量 AMAP_KEY / AMAP_SECURITY_CODE 覆盖（便于容器部署）。"""
+    也支持用环境变量 AMAP_KEY / AMAP_SECURITY_CODE / AMAP_WEB_KEY 覆盖（便于容器部署）。
+    结果按文件 mtime 缓存，避免 /api/status 高频调用反复读盘。"""
+    global _amap_cache
+    try:
+        mtime = AMAP_CONF_PATH.stat().st_mtime if AMAP_CONF_PATH.exists() else 0
+    except OSError:
+        mtime = 0
+    cache = _amap_cache
+    if cache and cache.get("_mtime") == mtime:
+        return dict(cache["conf"])
     conf = {"key": "", "securityJsCode": "", "webKey": ""}
-    if AMAP_CONF_PATH.exists():
+    if mtime:
         try:
             d = json.loads(AMAP_CONF_PATH.read_text(encoding="utf-8"))
             if isinstance(d, dict):
@@ -303,13 +330,16 @@ def load_amap_conf() -> dict:
         conf["securityJsCode"] = env_sec
     if env_web:
         conf["webKey"] = env_web
+    _amap_cache = {"_mtime": mtime, "conf": dict(conf)}
     return conf
 
 def save_amap_conf(conf: dict):
+    global _amap_cache
     data = {k: str(conf.get(k, "") or "") for k in ("key", "securityJsCode", "webKey")}
     tmp = AMAP_CONF_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, AMAP_CONF_PATH)
+    _amap_cache = None      # 让下次读取重新加载
 
 def normalize_optional_num(v, default=None):
     """数字字段：空串/None → default；否则 float。"""
@@ -1308,6 +1338,7 @@ def api_logs_clear(_t: None = Depends(require_token)):
 
 # ---------------- 启动 ----------------
 init_db()
+cleanup_stale_temp_accounts()
 _start_scheduler()
 
 if __name__ == "__main__":
