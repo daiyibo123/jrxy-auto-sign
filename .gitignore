@@ -39,3 +39,22 @@ jrxy-engine/*.jpeg
 jrxy-engine/*.png
 jrxy-engine/*.webp
 jrxy-engine/*.gif
+
+# ===== 照片池 / 高德 Key（运行时生成，含个人图像与密钥）=====
+# web-server/data/ 已整体忽略，此处显式列出以便一眼确认
+web-server/data/photo_pool/
+web-server/data/amap.json
+web-server/data/schedule.json
+web-server/data/signlog.db
+web-server/data/web_token.txt
+
+# ===== 本地部署脚本与记录（每台机器路径不同，不入库）=====
+start.bat
+install.bat
+部署记录.md
+部署说明*.md
+
+# ===== 临时配置文件（照片池随机时生成，异常退出可能残留）=====
+accounts/_tmp-*.yml
+*.tmp
+
