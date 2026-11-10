@@ -41,6 +41,7 @@ import hmac
 import json
 import logging
 import os
+import random
 import re
 import sqlite3
 import subprocess
@@ -70,6 +71,10 @@ ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "signlog.db"
 SCHED_PATH = DATA_DIR / "schedule.json"
 INDEX_HTML = STATIC_DIR / "index.html"
+# 照片池：存放多张候选签到照片，账号可开启“随机选一张”避免每次都用同一张
+PHOTO_POOL_DIR = Path(os.getenv("JRXY_PHOTO_POOL_DIR", str(DATA_DIR / "photo_pool")))
+PHOTO_POOL_DIR.mkdir(parents=True, exist_ok=True)
+PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 
 IS_WIN = os.name == "nt"
 ENGINE_PY = ENGINE_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
@@ -222,12 +227,57 @@ def write_account(name: str, user: dict, http_proxy: str = ""):
     yml, _ = account_paths(name)
     yml.write_text(dump_account(user, http_proxy), encoding="utf-8")
 
+def write_temp_account(name: str, user: dict, photo_override: str) -> str:
+    """把账号配置写成临时副本（仅覆盖 photo），供引擎本次运行使用。
+    文件名以 _ 开头：list_accounts() 会跳过 _ 开头的文件，
+    因此不会被误当成新账号；valid_account_name 也拒绝 _ 开头，双重保险。运行完立即删除。"""
+    tmp_user = dict(user)
+    tmp_user["photo"] = photo_override
+    proxy = str(user.get("httpProxy", "") or "")
+    tmp = ACCOUNTS_DIR / ("_tmp-%s-%s.yml" % (name, uuid.uuid4().hex[:8]))
+    tmp.write_text(dump_account(tmp_user, proxy), encoding="utf-8")
+    return str(tmp)
+
 def mask_username(name: str) -> str:
     if not name:
         return ""
     if len(name) <= 4:
         return name[0] + "***"
     return name[:4] + "***"
+
+# ---------------- 照片池 ----------------
+def list_pool_photos() -> list:
+    """列出照片池中的图片文件名（按名称排序）。"""
+    if not PHOTO_POOL_DIR.is_dir():
+        return []
+    out = []
+    for f in sorted(os.listdir(PHOTO_POOL_DIR)):
+        p = PHOTO_POOL_DIR / f
+        if p.is_file() and f.lower().endswith(PHOTO_EXTS):
+            out.append(f)
+    return out
+
+def pick_random_pool_photo() -> Optional[str]:
+    """从照片池随机取一张，返回引擎可用的相对路径（相对 jrxy-engine/ 根目录）。
+    池为空时返回 None，调用方应回退到账号原有 photo。"""
+    photos = list_pool_photos()
+    if not photos:
+        return None
+    return "../web-server/data/photo_pool/%s" % random.choice(photos)
+
+def resolve_account_photo(user: dict) -> str:
+    """决定本次运行实际使用的照片路径。
+    photoRandom=1 且照片池非空时随机取一张；否则用账号固定 photo。"""
+    try:
+        use_random = int(user.get("photoRandom", 0) or 0) == 1
+    except (TypeError, ValueError):
+        use_random = False
+    if use_random:
+        picked = pick_random_pool_photo()
+        if picked:
+            return picked
+        log.warning("账号开启随机照片，但照片池为空，回退使用 %s", user.get("photo") or "(未设置)")
+    return str(user.get("photo", "") or "")
 
 def normalize_optional_num(v, default=None):
     """数字字段：空串/None → default；否则 float。"""
@@ -249,8 +299,12 @@ def account_summary(name: str) -> dict:
         "lat": user.get("lat"),
         "address": user.get("address", ""),
         "photo": user.get("photo", ""),
+        "photo_random": int(user.get("photoRandom", 0) or 0) == 1,
         "password_set": bool(user.get("password")),
         "device_id": dev or "（未设置，首次运行自动生成）",
+        # 按账号独立定时
+        "schedule_enabled": int(user.get("scheduleEnabled", 0) or 0) == 1,
+        "schedule_time": str(user.get("scheduleTime", "") or ""),
     }
 
 # ---------------- 引擎执行 ----------------
@@ -360,13 +414,32 @@ def run_account(name: str, dry: bool) -> str:
         did = ensure_device_id(name)
     except HTTPException as e:
         return str(e.detail)
+    # 开启“照片池随机”时，把随机选中的照片写进临时配置副本，避免污染 accounts/*.yml
+    conf_path = str(yml)
+    try:
+        user, _ = read_account(name)
+        if int(user.get("photoRandom", 0) or 0) == 1:
+            picked = resolve_account_photo(user)
+            if picked and picked != str(user.get("photo", "") or ""):
+                tmp_conf = write_temp_account(name, user, picked)
+                conf_path = tmp_conf
+                log.info("账号 %s 使用照片池随机照片: %s", name, picked)
+    except Exception as e:
+        log.warning("准备随机照片失败，回退原配置: %s", e)
     cmd = [str(ENGINE_PY), "-W", "ignore", str(SUBMIT_SCRIPT),
            "--dry" if dry else "--submit",
            "--variant", "fkey_cat", "--protocol", "ios",
-           "--config", str(yml), "--device-id", did]
+           "--config", conf_path, "--device-id", did]
     log.info("run_account %s dry=%s", name, dry)
     with _run_lock:
-        return run_cmd(cmd, timeout=RUN_TIMEOUT)
+        try:
+            return run_cmd(cmd, timeout=RUN_TIMEOUT)
+        finally:
+            if conf_path != str(yml):
+                try:
+                    os.remove(conf_path)
+                except OSError:
+                    pass
 
 def is_exec_error(result: str) -> bool:
     return notify_head(result) == "执行异常"
@@ -443,22 +516,26 @@ def parse_marker(out: str, marker: str):
 #   last_slot  最近一个“全部账号都已执行完”的计划时间点（"YYYY-MM-DD HH:MM"），每个点只执行一次
 #   progress   正在执行的时间点及已完成账号 {"slot":..., "started":..., "results": {账号: 结果}}；
 #              执行中途重启后，补签窗口内只补跑 results 里没有的账号
-_SCHED_KEYS = ("enabled", "time", "last_slot", "last_run", "last_result", "progress")
+_SCHED_KEYS = ("enabled", "time", "last_slot", "last_run", "last_result", "progress",
+               "acct_slots")
 
 def load_schedule():
     st = {"enabled": DEFAULT_AUTO_SIGN, "time": DEFAULT_SIGN_TIME, "next": None,
-          "last_slot": None, "last_run": None, "last_result": None, "progress": None}
+          "last_slot": None, "last_run": None, "last_result": None, "progress": None,
+          "acct_slots": {}}
     if SCHED_PATH.exists():
         try:
             d = json.loads(SCHED_PATH.read_text(encoding="utf-8"))
             st["enabled"] = bool(d.get("enabled", st["enabled"]))
             st["time"] = str(d.get("time", st["time"]))
-            for k in ("last_slot", "last_run", "last_result", "progress"):
+            for k in ("last_slot", "last_run", "last_result", "progress", "acct_slots"):
                 st[k] = d.get(k)
         except Exception:
             pass
     if not isinstance(st["progress"], dict) or not isinstance(st["progress"].get("results"), dict):
         st["progress"] = None
+    if not isinstance(st.get("acct_slots"), dict):
+        st["acct_slots"] = {}
     return st
 
 _sched_file_lock = threading.Lock()
@@ -523,6 +600,93 @@ def _wait_until(t: datetime):
             return
         time.sleep(min(left, 30))
 
+# ---------------- 按账号独立定时 ----------------
+def per_account_schedules() -> dict:
+    """返回 {账号名: "HH:MM"}，仅含开启了“独立定时”且时间合法的账号。
+    这些账号不再跟随全局定时，改用自己的时间点。"""
+    out = {}
+    for nm in list_accounts():
+        try:
+            user, _ = read_account(nm)
+        except Exception:
+            continue
+        try:
+            enabled = int(user.get("scheduleEnabled", 0) or 0) == 1
+        except (TypeError, ValueError):
+            enabled = False
+        tm = str(user.get("scheduleTime", "") or "").strip()
+        if not enabled or not tm:
+            continue
+        try:
+            _parse_hm(tm)
+        except ValueError:
+            continue
+        out[nm] = tm
+    return out
+
+def _acct_slot_state() -> dict:
+    """按账号的已执行记录：{账号名: "YYYY-MM-DD HH:MM"}，存在 schedule.json 里。"""
+    st = scheduler_state.get("acct_slots")
+    return st if isinstance(st, dict) else {}
+
+def _mark_acct_slot_done(names_times: dict):
+    """把“最近一个已过去的时间点”按账号记为已执行，避免保存设置后立即补跑。"""
+    t = now()
+    slots = scheduler_state.setdefault("acct_slots", {})
+    for nm, tm in names_times.items():
+        try:
+            slot = _slot_today(tm, t)
+        except ValueError:
+            continue
+        if slot > t:
+            slot -= timedelta(days=1)
+        slots[nm] = slot.strftime(SLOT_FMT)
+
+def _next_acct_slot(nm: str, tm: str):
+    """返回该账号下一个待执行的时间点（当天已过且仍在补签窗口内 → 立即执行）。"""
+    t = now()
+    today = _slot_today(tm, t)
+    done = _acct_slot_state().get(nm)
+    if today <= t:
+        if done != today.strftime(SLOT_FMT) and t - today <= timedelta(minutes=CATCHUP_MINUTES):
+            return today
+        return today + timedelta(days=1)
+    return today
+
+def _fire_one_account(nm: str, slot: datetime, tm: str):
+    """执行单个账号的独立定时（含重试）。"""
+    slot_s = slot.strftime(SLOT_FMT)
+    started = now()
+    delay = int((started - slot).total_seconds())
+    trigger = "独立定时" if delay < 120 else "独立定时补签"
+    log.info("账号 %s %s触发：计划 %s，实际 %s（延迟 %ss）",
+             nm, trigger, slot_s, started.strftime("%H:%M:%S"), delay)
+    max_attempts = 1 + max(0, MAX_RETRIES)
+    result = None
+    attempts = 0
+    while attempts < max_attempts:
+        attempts += 1
+        will_retry = attempts < max_attempts
+        try:
+            result, _ = run_and_report(nm, False, "%s(%s)" % (trigger, tm), will_retry=will_retry)
+        except Exception as e:
+            result = "执行异常：%s" % e
+            log.exception("独立定时 %s 执行出错", nm)
+        if not is_exec_error(result) or not will_retry:
+            break
+        log.info("账号 %s 执行异常，%s 分钟后重试（第 %d/%d 次）",
+                 nm, RETRY_DELAY_MINUTES, attempts, max_attempts)
+        _wait_until(now() + timedelta(minutes=RETRY_DELAY_MINUTES))
+    # 记录该账号该时间点已执行
+    scheduler_state.setdefault("acct_slots", {})[nm] = slot_s
+    scheduler_state["last_run"] = started.strftime("%Y-%m-%d %H:%M:%S")
+    save_schedule()
+    save_log("独立定时汇总[%s]" % nm, result or "无结果",
+             "账号 %s 的独立定时\n计划时间 %s（UTC%+g）\n开始 %s\n结束 %s\n共执行 %d 次" % (
+                 nm, slot_s, TZ_OFFSET, started.strftime("%Y-%m-%d %H:%M:%S"),
+                 now().strftime("%Y-%m-%d %H:%M:%S"), attempts))
+    return result
+
 def _fire(slot: datetime):
     """执行一个定时点：先串行跑全部账号；“执行异常”的账号隔 RETRY_DELAY_MINUTES 分钟
     再串行重试，最多 MAX_RETRIES 次，成功/已签/失败即停止。
@@ -556,6 +720,11 @@ def _fire(slot: datetime):
 
     try:
         names = list_accounts()
+        # 开启了“独立定时”的账号由各自的定时器负责，全局批量时跳过，避免重复签到
+        per = per_account_schedules()
+        names = [n for n in names if n not in per]
+        if per:
+            log.info("以下账号已启用独立定时，本次全局定时跳过：%s", "、".join(per))
         first = True
         # 第一轮：还没执行过的账号
         for nm in [n for n in names if n not in prog["results"]]:
@@ -597,19 +766,47 @@ def _fire(slot: datetime):
                  detail, ("\n\n重试情况：\n" + tries) if tries else ""))
 
 def scheduler_loop():
+    """主循环：全局定时 + 各账号的独立定时。
+    每轮都重新计算“最近的下一个待执行时间点”，取全局与全部独立定时中最早的；
+    睡最多 30 秒后按墙上时间重算，设置变更能及时生效。"""
     while True:
         st = scheduler_state
         try:
-            if not st["enabled"]:
+            # 1) 全局定时（跳过已启用独立定时的账号）
+            cand = []            # [(时间点, 类型, 账号名或None, 时间字符串)]
+            if st["enabled"]:
+                gslot = _pending_slot(st["time"])
+                cand.append((gslot, "global", None, st["time"]))
+
+            # 2) 各账号独立定时（不受全局 enabled 开关影响，账号自己说了算）
+            per = per_account_schedules()
+            for nm, tm in per.items():
+                try:
+                    cand.append((_next_acct_slot(nm, tm), "acct", nm, tm))
+                except ValueError:
+                    continue
+
+            # 清理已不存在/已关闭独立定时的账号记录
+            slots = _acct_slot_state()
+            for gone in [n for n in slots if n not in per]:
+                slots.pop(gone, None)
+
+            if not cand:
                 st["next"] = None
                 _sched_wake.wait(timeout=30)
                 _sched_wake.clear()
                 continue
-            slot = _pending_slot(st["time"])
-            st["next"] = slot.strftime("%Y-%m-%d %H:%M:%S")
-            wait = (slot - now()).total_seconds()
+
+            cand.sort(key=lambda x: x[0])
+            nxt, kind, nm, tm = cand[0]
+            st["next"] = nxt.strftime("%Y-%m-%d %H:%M:%S")
+            st["next_kind"] = "acct:%s@%s" % (nm, tm) if kind == "acct" else "global@%s" % tm
+            wait = (nxt - now()).total_seconds()
             if wait <= 0:
-                _fire(slot)
+                if kind == "acct":
+                    _fire_one_account(nm, nxt, tm)
+                else:
+                    _fire(nxt)
                 continue
             # 每次最多睡 30 秒再按墙上时间重算：设置变更、系统对时跳变都能及时生效
             _sched_wake.wait(timeout=min(wait, 30))
@@ -626,9 +823,18 @@ def _start_scheduler():
             save_schedule()
         except ValueError:
             pass
+    # 独立定时的账号同样不补跑“已过去的时间点”
+    try:
+        _mark_acct_slot_done(per_account_schedules())
+        save_schedule()
+    except Exception:
+        log.exception("初始化账号独立定时失败")
     log.info("内置定时：enabled=%s time=%s 时区=UTC%+g 当前=%s token=%s",
              scheduler_state["enabled"], scheduler_state["time"], TZ_OFFSET,
              now().strftime("%Y-%m-%d %H:%M:%S"), "已启用" if WEB_TOKEN else "未设置")
+    per = per_account_schedules()
+    if per:
+        log.info("账号独立定时：%s", "、".join("%s@%s" % kv for kv in per.items()))
     threading.Thread(target=scheduler_loop, daemon=True, name="jrxy-scheduler").start()
 
 # ---------------- FastAPI ----------------
@@ -657,9 +863,12 @@ def api_status(_t: None = Depends(require_token)):
             "enabled": scheduler_state["enabled"],
             "time": scheduler_state["time"],
             "next": scheduler_state["next"],
+            "next_kind": scheduler_state.get("next_kind"),
             "last_run": scheduler_state.get("last_run"),
             "last_result": scheduler_state.get("last_result"),
         },
+        "per_account_schedules": per_account_schedules(),
+        "photo_pool": {"count": len(list_pool_photos()), "dir": str(PHOTO_POOL_DIR)},
         "server_time": now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": "UTC%+g" % TZ_OFFSET,
         "system_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -685,6 +894,9 @@ def api_account_get(name: str, _t: None = Depends(require_token)):
         "address": user.get("address", ""),
         "abnormalReason": user.get("abnormalReason", ""),
         "photo": user.get("photo", ""),
+        "photoRandom": int(user.get("photoRandom", 0) or 0),
+        "scheduleEnabled": int(user.get("scheduleEnabled", 0) or 0),
+        "scheduleTime": str(user.get("scheduleTime", "") or ""),
         "checkTitle": user.get("checkTitle", 0),
         "username": user.get("username", ""),
         "username_set": bool(user.get("username")),
@@ -733,6 +945,21 @@ def build_user_from_body(body: dict, existing: dict = None) -> dict:
         "method": n_method,
         "rcvOption": str(body.get("notifyRcv", cur_no.get("rcvOption", ""))).strip(),
     }
+    # 照片池随机：1=每次运行从照片池随机取一张
+    raw_pr = body.get("photoRandom", cur.get("photoRandom", 0))
+    try:
+        photoRandom = 1 if int(raw_pr or 0) == 1 else 0
+    except (TypeError, ValueError):
+        photoRandom = 1 if raw_pr is True else 0
+    # 按账号独立定时
+    raw_se = body.get("scheduleEnabled", cur.get("scheduleEnabled", 0))
+    try:
+        scheduleEnabled = 1 if int(raw_se or 0) == 1 else 0
+    except (TypeError, ValueError):
+        scheduleEnabled = 1 if raw_se is True else 0
+    scheduleTime = str(body.get("scheduleTime", cur.get("scheduleTime", "")) or "").strip()
+    if scheduleTime:
+        _parse_hm(scheduleTime)      # 非法时间直接抛 400
     user = {
         "type": typ,
         "schoolName": schoolName,
@@ -743,6 +970,9 @@ def build_user_from_body(body: dict, existing: dict = None) -> dict:
         "lat": lat,
         "abnormalReason": str(body.get("abnormalReason", cur.get("abnormalReason", ""))).strip(),
         "photo": str(body.get("photo", cur.get("photo", ""))).strip(),
+        "photoRandom": photoRandom,
+        "scheduleEnabled": scheduleEnabled,
+        "scheduleTime": scheduleTime,
         "checkTitle": checkTitle,
         "notifyOption": notify,
     }
@@ -777,6 +1007,17 @@ def api_account_update(name: str, body: dict, _t: None = Depends(require_token))
         _, did_file = account_paths(name)
         did_file.write_text(dev_new, encoding="utf-8")
     save_log("账号管理", "账号已更新", "name=%s school=%s" % (name, new_user["schoolName"]))
+    # 独立定时变更后立即让调度器重算，避免等最多 30 秒
+    try:
+        if int(new_user.get("scheduleEnabled", 0) or 0) == 1:
+            tm = str(new_user.get("scheduleTime", "") or "")
+            if tm:
+                # 把“已过去的时间点”标记为已执行，保存设置不会立刻补跑
+                _mark_acct_slot_done({name: tm})
+                save_schedule()
+        _sched_wake.set()
+    except Exception:
+        log.exception("唤醒调度器失败")
     return {"ok": True, "account": account_summary(name)}
 
 @app.delete("/api/accounts/{name}")
@@ -786,6 +1027,7 @@ def api_account_delete(name: str, _t: None = Depends(require_token)):
     yml.unlink(missing_ok=True)
     # deviceId 文件保留（若账号重新接入，可沿用原绑定；文件不随 yml 被批量脚本扫描）
     save_log("账号管理", "账号已删除", "name=%s（deviceId 文件保留以防误删绑定）" % name)
+    _sched_wake.set()   # 让调度器重算（该账号的独立定时记录会被清掉）
     return {"ok": True, "note": "已删除账号配置；deviceId 文件已保留（重新接入可沿用原绑定）"}
 
 # ---------------- 账号操作：探测/签到/登录测试/签到范围/照片 ----------------
@@ -871,6 +1113,60 @@ def api_account_photo(name: str, body: dict, _t: None = Depends(require_token)):
     write_account(name, user)
     save_log(f"账号[{name}] 照片", "签到照片已上传", "file=%s size=%dB" % (fname, len(raw)))
     return {"ok": True, "photo": user["photo"], "size": len(raw)}
+
+# ---------------- 照片池 ----------------
+@app.get("/api/photo-pool")
+def api_pool_list(_t: None = Depends(require_token)):
+    photos = list_pool_photos()
+    items = []
+    for f in photos:
+        try:
+            size = (PHOTO_POOL_DIR / f).stat().st_size
+        except OSError:
+            size = 0
+        items.append({"name": f, "size": size, "url": "/api/photo-pool/file/" + urllib.parse.quote(f)})
+    return {"ok": True, "dir": str(PHOTO_POOL_DIR), "count": len(items), "photos": items}
+
+@app.get("/api/photo-pool/file/{fname}")
+def api_pool_file(fname: str, _t: None = Depends(require_token)):
+    """预览照片池中的单张图片。"""
+    safe = os.path.basename(fname)
+    p = PHOTO_POOL_DIR / safe
+    if not safe or not p.is_file() or not safe.lower().endswith(PHOTO_EXTS):
+        raise HTTPException(status_code=404, detail="照片不存在")
+    return FileResponse(p)
+
+@app.post("/api/photo-pool")
+def api_pool_upload(body: dict, _t: None = Depends(require_token)):
+    """上传一张图片到照片池。"""
+    fname = os.path.basename(str(body.get("name", "")).strip())
+    data = str(body.get("data", ""))
+    if not fname or not data:
+        raise HTTPException(status_code=400, detail="缺少文件名或图片数据")
+    if not fname.lower().endswith(PHOTO_EXTS):
+        raise HTTPException(status_code=400, detail="仅支持 jpg/png/webp/gif 图片")
+    try:
+        raw = base64.b64decode(data.split(",")[-1])
+    except Exception:
+        raise HTTPException(status_code=400, detail="图片数据解码失败")
+    if not raw:
+        raise HTTPException(status_code=400, detail="图片内容为空")
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片不能超过 5MB")
+    target = PHOTO_POOL_DIR / fname
+    target.write_bytes(raw)
+    save_log("照片池", "照片已加入池", "file=%s size=%dB 当前共 %d 张" % (fname, len(raw), len(list_pool_photos())))
+    return {"ok": True, "name": fname, "size": len(raw), "count": len(list_pool_photos())}
+
+@app.delete("/api/photo-pool/{fname}")
+def api_pool_delete(fname: str, _t: None = Depends(require_token)):
+    safe = os.path.basename(fname)
+    p = PHOTO_POOL_DIR / safe
+    if not safe or not p.is_file() or not safe.lower().endswith(PHOTO_EXTS):
+        raise HTTPException(status_code=404, detail="照片不存在")
+    p.unlink()
+    save_log("照片池", "照片已移除", "file=%s 剩余 %d 张" % (safe, len(list_pool_photos())))
+    return {"ok": True, "count": len(list_pool_photos())}
 
 # ---------------- 批量运行 / 定时 / 日志 ----------------
 @app.post("/api/batch-run")

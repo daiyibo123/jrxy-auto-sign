@@ -252,7 +252,7 @@
     </div>
     <div class="tbl-scroll">
       <table>
-        <thead><tr><th>名称</th><th>学校</th><th>账号</th><th>类型</th><th>坐标</th><th>deviceId</th><th style="width:210px">操作</th></tr></thead>
+        <thead><tr><th>名称</th><th>学校</th><th>账号</th><th>类型</th><th>坐标</th><th>独立定时</th><th>照片</th><th>deviceId</th><th style="width:210px">操作</th></tr></thead>
         <tbody id="accountBody"><tr><td colspan="7" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
       </table>
     </div>
@@ -270,7 +270,7 @@
   </div>
 
   <div class="panel">
-    <h2><span class="hico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.2V12l3.4 2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span>内置定时（每天批量签到全部账号） <span class="tag">服务器部署时的自足定时器</span></h2>
+    <h2><span class="hico" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.2V12l3.4 2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span>内置定时 <span class="tag">服务器部署时的自足定时器</span></h2>
     <div class="row">
       <div class="field"><label>启用定时</label>
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -280,6 +280,26 @@
       <div class="field"><label>每日签到时间（HH:MM）</label><input type="time" id="inTime"></div>
       <button class="primary" onclick="saveSchedule()">保存定时</button>
       <span class="tag" id="nextRun"></span>
+    </div>
+    <div class="row" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)">
+      <div class="field" style="flex:1 1 100%">
+        <label>为每个账号开启分别定时</label>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--muted);font-size:13px">
+          <input type="checkbox" id="inPerAcct" style="width:16px;height:16px" onchange="togglePerAcctPanel()">
+          勾选后，可对账号列表中的账号分别设置独立的签到时间（未开启的账号仍跟随上方全局时间）
+        </label>
+      </div>
+    </div>
+    <div id="perAcctPanel" style="display:none;margin-top:12px">
+      <div class="tbl-scroll">
+        <table>
+          <thead><tr><th style="width:190px">账号</th><th style="width:150px">独立定时</th><th style="width:170px">时间（HH:MM）</th><th>下次执行</th><th style="width:150px">操作</th></tr></thead>
+          <tbody id="perAcctBody"><tr><td colspan="5" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <span class="tag">提示：勾选「独立定时」并填好时间后，该账号不再参与上方全局批量签到，改为按自己的时间单独签到</span>
+      </div>
     </div>
   </div>
 
@@ -366,6 +386,11 @@
               <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
               <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
             </div>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px;font-size:12px;color:var(--muted)">
+              <input type="checkbox" id="mPhotoRandom" style="width:15px;height:15px">
+              从照片池中随机选择照片
+            </label>
+            <div style="margin-top:6px;font-size:12px;color:var(--faint)" id="mPoolHint">照片池：加载中…</div>
           </div>
           <div class="field"><label>表单标题校验</label>
             <select id="mTitle">
@@ -404,6 +429,25 @@
       <button class="primary" onclick="saveAccount()">保存账号</button>
       <button class="ghost" onclick="closeAccountModal()">取消</button>
       <span class="hint" id="amFootHint"></span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="poolMask">
+  <div class="modal" style="max-width:760px">
+    <h3>照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
+    <p class="tag" style="margin-bottom:12px">支持一次多选上传；同名文件会覆盖。建议放几张不同角度/时间的照片，避免每次都是同一张。</p>
+    <div class="tbl-scroll" style="max-height:340px">
+      <table>
+        <thead><tr><th>预览</th><th>文件名</th><th>操作</th></tr></thead>
+        <tbody id="poolBody"><tr><td colspan="3" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" onclick="el('poolFile').click()">＋ 添加照片</button>
+      <input type="file" id="poolFile" accept="image/*" multiple style="display:none">
+      <button class="ghost" onclick="closePoolModal()">关闭</button>
+      <span class="tag" id="poolCountHint"></span>
     </div>
   </div>
 </div>
@@ -456,11 +500,13 @@ function coordText(a){
 
 /* ================= 状态 ================= */
 function renderStatus(s){
+  window.__status = s;
   el("cPlatform").textContent = s.platform + (s.engine_ready ? "" : "（引擎缺失）");
   el("cCount").textContent = s.account_count;
-  el("cSched").textContent = s.scheduler.enabled
+  const perCount = s.per_account_schedules ? Object.keys(s.per_account_schedules).length : 0;
+  el("cSched").textContent = (s.scheduler.enabled
     ? (s.scheduler.time + " 启用" + (s.scheduler.next ? " · 下次 " + s.scheduler.next : ""))
-    : "已停用";
+    : "已停用") + (perCount ? (" · 独立定时 " + perCount + " 个") : "");
   el("cTime").textContent = s.server_time + (s.timezone ? " " + s.timezone : "")
     + (s.system_time && s.system_time.slice(0, 16) !== s.server_time.slice(0, 16) ? "（系统时钟 " + s.system_time + "）" : "");
   el("inAuto").checked = s.scheduler.enabled;
@@ -471,6 +517,17 @@ function renderStatus(s){
   el("engineText").textContent = s.engine_ready ? (s.platform + " · " + st) : "引擎环境缺失！请先部署引擎 venv";
   el("engineDot").className = "dot " + (s.engine_ready ? "on" : "off");
   el("platformBadge").title = "账号目录 " + s.accounts_dir + " · 服务器时间 " + s.server_time;
+  // 照片池数量（供账号弹窗提示用）
+  if (s.photo_pool){
+    window.__poolCount = s.photo_pool.count;
+    if (typeof updatePoolHint === "function") updatePoolHint();
+  }
+  // 逐账号定时面板：任账号开启了独立定时就自动展开
+  if (perCount && el("perAcctPanel")){
+    el("inPerAcct").checked = true;
+    el("perAcctPanel").style.display = "";
+    renderPerAcct();
+  }
 }
 
 /* ================= 账号列表 ================= */
@@ -487,16 +544,23 @@ async function loadAccounts(){
 }
 function renderAccounts(list){
   const b = el("accountBody");
-  if (!list.length){ b.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">暂无账号，点击右上角「新增账号」创建</td></tr>'; return; }
+  if (!list.length){ b.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--muted)">暂无账号，点击右上角「新增账号」创建</td></tr>'; return; }
   b.innerHTML = list.map(a=>{
     const dev = a.device_id && !a.device_id.includes("未设置") ? a.device_id : '<span style="color:var(--warn)">未设置</span>';
-    const passCls = a.password_set ? 'ok' : 'bad';
+    const sched = a.schedule_enabled
+      ? '<span class="pill ok">' + esc(a.schedule_time || '-') + '</span>'
+      : '<span style="color:var(--faint)">跟随全局</span>';
+    const photo = a.photo_random
+      ? '<span class="pill ok">照片池随机</span>'
+      : (a.photo ? '<span title="' + esc(a.photo) + '">固定</span>' : '<span style="color:var(--faint)">-</span>');
     return `<tr>
       <td><b>${esc(a.name)}</b>${a.password_set ? '' : '<br><span style="color:var(--warn);font-size:11px">未设密码</span>'}</td>
       <td>${esc(a.school || "-")}</td>
       <td class="mono">${esc(a.username || "-")}</td>
       <td>${TYPE_MAP[a.type] ?? ("type=" + a.type)}</td>
       <td class="mono">${coordText(a)}</td>
+      <td>${sched}</td>
+      <td>${photo}</td>
       <td class="mono" title="${esc(a.device_id || '')}">${dev}</td>
       <td>
         <button class="ghost small" onclick="openAccountModal('${esc(a.name)}')">编辑</button>
@@ -513,6 +577,8 @@ async function openAccountModal(name){
   editingName = name || "";
   const fields = ["mName","mSchool","mType","mUser","mPass","mProxy","mLon","mLat","mAddr","mAbn","mPhoto","mTitle","mDev","mNotifyMethod","mNotifyRcv"];
   fields.forEach(f => el(f).value = "");
+  el("mPhotoRandom").checked = false;
+  updatePoolHint();
   el("mLoginState").className = "pill def"; el("mLoginState").textContent = "未测试";
   el("mRangeState").textContent = ""; el("amHint").textContent = "";
   if (editingName){
@@ -531,6 +597,7 @@ async function openAccountModal(name){
       el("mAddr").value = d.address || "";
       el("mAbn").value = d.abnormalReason || "";
       el("mPhoto").value = d.photo || "";
+      el("mPhotoRandom").checked = !!d.photoRandom;
       el("mTitle").value = String(d.checkTitle || 0);
       el("mDev").value = d.device_id || "";
       el("mDev").placeholder = "留空 = 沿用当前 deviceId（勿改）";
@@ -569,6 +636,7 @@ function collectAccount(){
     address: el("mAddr").value.trim(),
     abnormalReason: el("mAbn").value.trim(),
     photo: el("mPhoto").value.trim(),
+    photoRandom: el("mPhotoRandom").checked ? 1 : 0,
     checkTitle: el("mTitle").value,
     notifyMethod: el("mNotifyMethod").value,
     notifyRcv: el("mNotifyRcv").value.trim(),
@@ -733,7 +801,123 @@ async function saveSchedule(){
     await api("/api/schedule", {method:"POST", body:JSON.stringify({
       enabled: el("inAuto").checked, time: el("inTime").value
     })});
-    toast("定时设置已保存", "ok");
+    toast("全局定时设置已保存", "ok");
+    refreshStatus();
+  }catch(e){ toast("保存失败：" + e.message, "bad"); }
+}
+
+/* ================= 照片池 ================= */
+let poolCache = [];
+async function loadPhotoPool(){
+  try{
+    const r = await api("/api/photo-pool");
+    poolCache = r.photos || [];
+    return poolCache;
+  }catch(e){ poolCache = []; return []; }
+}
+function updatePoolHint(){
+  const n = (poolCache && poolCache.length) ? poolCache.length : (window.__poolCount || 0);
+  const box = el("mPoolHint");
+  if (!box) return;
+  box.innerHTML = n
+    ? ('照片池共 <b>' + n + '</b> 张 · <a href="#" onclick="openPoolModal();return false">管理照片池</a>')
+    : ('照片池为空 · <a href="#" onclick="openPoolModal();return false">去添加照片</a>');
+}
+async function uploadPoolPhotos(ev){
+  const fi = ev.target;
+  const files = Array.from(fi.files || []);
+  if (!files.length) return;
+  let ok = 0, fail = 0;
+  for (const f of files){
+    if (f.size > 5 * 1024 * 1024){ toast(f.name + " 超过 5MB，已跳过", "bad"); fail++; continue; }
+    const ext = (f.name.split(".").pop() || "").toLowerCase();
+    if (!["jpg","jpeg","png","webp","gif"].includes(ext)){ toast(f.name + " 格式不支持，已跳过", "bad"); fail++; continue; }
+    try{
+      const data = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result);
+        r.onerror = () => rej(new Error("读取失败"));
+        r.readAsDataURL(f);
+      });
+      await api("/api/photo-pool", {method:"POST", body:JSON.stringify({name: f.name, data})});
+      ok++;
+    }catch(e){ fail++; }
+  }
+  fi.value = "";
+  await loadPhotoPool();
+  renderPool();
+  updatePoolHint();
+  toast("照片池：成功 " + ok + " 张" + (fail ? ("，失败 " + fail + " 张") : ""), ok ? "ok" : "bad");
+}
+function openPoolModal(){
+  el("poolMask").classList.add("show");
+  loadPhotoPool().then(()=>{ renderPool(); });
+}
+function closePoolModal(){ el("poolMask").classList.remove("show"); }
+function renderPool(){
+  const b = el("poolBody");
+  const cnt = el("poolCountHint");
+  if (cnt) cnt.textContent = "当前共 " + poolCache.length + " 张";
+  if (!poolCache.length){
+    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">照片池为空，点击下方「添加照片」上传多张候选照片</td></tr>';
+    return;
+  }
+  b.innerHTML = poolCache.map(p=>`<tr>
+    <td style="width:90px"><img src="${p.url}" alt="" style="width:64px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--line)"></td>
+    <td class="mono">${esc(p.name)}</td>
+    <td style="width:90px"><button class="danger small" onclick="deletePoolPhoto('${esc(p.name)}')">移除</button></td>
+  </tr>`).join("");
+}
+async function deletePoolPhoto(name){
+  if (!confirm("确定从照片池移除「" + name + "」？")) return;
+  try{
+    await api("/api/photo-pool/" + encodeURIComponent(name), {method:"DELETE"});
+    await loadPhotoPool(); renderPool(); updatePoolHint();
+    toast("已移除", "ok");
+  }catch(e){ toast("移除失败：" + e.message, "bad"); }
+}
+
+/* ================= 账号独立定时 ================= */
+let perAcctCache = [];
+function togglePerAcctPanel(){
+  const on = el("inPerAcct").checked;
+  el("perAcctPanel").style.display = on ? "" : "none";
+  if (on) renderPerAcct();
+}
+async function renderPerAcct(){
+  const b = el("perAcctBody");
+  try{
+    const r = await api("/api/accounts");
+    perAcctCache = r.accounts || [];
+  }catch(e){ perAcctCache = []; }
+  if (!perAcctCache.length){
+    b.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--muted)">暂无账号</td></tr>';
+    return;
+  }
+  const nextMap = (window.__status && window.__status.per_account_schedules) || {};
+  b.innerHTML = perAcctCache.map(a=>{
+    const on = !!a.schedule_enabled;
+    const t = a.schedule_time || "";
+    return `<tr>
+      <td><b>${esc(a.name)}</b></td>
+      <td><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" style="width:15px;height:15px" ${on?"checked":""} onchange="savePerAcct('${esc(a.name)}', this.checked, '${esc(t)}')"> 独立定时</label></td>
+      <td><input type="time" value="${esc(t)}" style="width:130px" onchange="savePerAcct('${esc(a.name)}', ${on}, this.value)"></td>
+      <td class="mono">${on && t ? esc(t) + ' 每天' : '<span style="color:var(--faint)">跟随全局</span>'}</td>
+      <td><button class="ghost small" onclick="savePerAcct('${esc(a.name)}', true, '${esc(t||'22:05')}')">启用</button>
+          <button class="ghost small" onclick="savePerAcct('${esc(a.name)}', false, '${esc(t)}')">停用</button></td>
+    </tr>`;
+  }).join("");
+}
+async function savePerAcct(name, enabled, time){
+  if (enabled && !time){ toast("请先填写该账号的签到时间", "bad"); return; }
+  try{
+    await api("/api/accounts/" + encodeURIComponent(name), {method:"POST", body:JSON.stringify({
+      scheduleEnabled: enabled ? 1 : 0,
+      scheduleTime: time || ""
+    })});
+    toast("账号「" + name + "」" + (enabled ? ("独立定时已开启：" + time) : "已跟随全局定时"), "ok");
+    await renderPerAcct();
     refreshStatus();
   }catch(e){ toast("保存失败：" + e.message, "bad"); }
 }
@@ -824,9 +1008,11 @@ function startClock(){
 }
 startClock();
 refreshAll();
-document.addEventListener("keydown", e=>{ if (e.key === "Escape") closeAccountModal(); });
+document.addEventListener("keydown", e=>{ if (e.key === "Escape"){ closeAccountModal(); closePoolModal(); } });
 el("accountMask").addEventListener("click", e=>{ if (e.target === el("accountMask")) closeAccountModal(); });
+el("poolMask").addEventListener("click", e=>{ if (e.target === el("poolMask")) closePoolModal(); });
 el("mPhotoFile").addEventListener("change", uploadPhotoAcc);
+el("poolFile").addEventListener("change", uploadPoolPhotos);
 setInterval(()=>{ api("/api/status").then(renderStatus).catch(()=>{}); }, 60000);
 setInterval(()=>{ loadLogs(); }, 30000);
 </script>
