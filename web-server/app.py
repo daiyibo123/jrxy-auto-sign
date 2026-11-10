@@ -469,6 +469,9 @@ def classify(out: str) -> str:
     # FORCE_MOD_PASS：学校统一认证要求强制改密码，需给出可操作提示
     if "FORCE_MOD_PASS" in out:
         return "需要修改密码：请到学校统一认证平台重新登录并修改一次密码"
+    # 2210990000：加密链路正确但设备未授权（非代码问题）
+    if "2210990000" in out:
+        return "签到失败：设备未授权，需使用真机 deviceId"
     res = parse_marker(out, "###RESULT###")
     if isinstance(res, dict) and res.get("status") in RESULT_LABELS:
         label = RESULT_LABELS[res["status"]]
@@ -539,9 +542,26 @@ def send_notify(name: str, title: str, msg: str) -> str:
         return "推送成功（Server酱已接收）"
     return "推送失败：code=%s %s" % (code, str(j.get("message") or j.get("info") or "")[:200])
 
+_last_submit_ts = {}      # {账号名: 上次真实提交的时间戳}，用于限频
+
 def run_account(name: str, dry: bool) -> str:
     if not ENGINE_PY.exists():
         return "引擎虚拟环境不存在: %s\n请先执行 deploy/install_windows.bat 或 deploy/install_linux.sh" % ENGINE_PY
+
+    # 提交频率保护：真实签到失败多为「设备未授权」，反复重试会加重风控。
+    # 同一账号 15 分钟内最多提交 1 次真实签到（dry 探测不受限）。
+    if not dry:
+        last = _last_submit_ts.get(name)
+        gap = 15 * 60
+        if last and (time.time() - last) < gap:
+            left = int(gap - (time.time() - last))
+            msg = ("为防止加重风控，同一账号 15 分钟内只允许提交 1 次真实签到。\n"
+                   "请 %d 分 %d 秒后再试，或先点「探测」验证配置。") % (left // 60, left % 60)
+            return "###RESULT###" + json.dumps(
+                {"status": "error", "msg": msg, "kind": "rate_limited"},
+                ensure_ascii=False) + "\n" + msg
+        _last_submit_ts[name] = time.time()
+
     yml, _ = account_paths(name)
     try:
         did = ensure_device_id(name)

@@ -651,6 +651,31 @@ function showActionableError(text, who){
     );
     return true;
   }
+  if (/rate_limited|15 分钟内只允许/.test(t)){
+    alert(
+      "提交过于频繁" + target + "\n\n"
+      + "同一账号 15 分钟内只允许提交 1 次真实签到。\n"
+      + "频繁失败提交会加重风控标记，可能导致账号被临时限制。\n\n"
+      + "建议：先用「探测」验证配置（探测不限频），确认无误后再签到。"
+    );
+    return true;
+  }
+  if (/设备未授权|2210990000/.test(t)){
+    alert(
+      "签到失败：设备未授权" + target + "\n\n"
+      + "加密链路正常（服务端已成功解密），但今日校园会校验：\n"
+      + "提交的 deviceId 必须与该账号在手机 App 里登录过的设备一致。\n"
+      + "用程序随机生成的 deviceId 会被判定为「未授权设备」。\n\n"
+      + "解决办法：\n"
+      + "1. 用手机抓包取出该账号真机的 deviceId\n"
+      + "   （可用 scripts/fetch_real_deviceid.py 或手机抓包工具）\n"
+      + "2. 编辑账号 → deviceId 填进去 → 保存\n"
+      + "3. 先点「探测」确认能登录，再点「签到」\n\n"
+      + "⚠️ 请不要反复重试：高频失败提交会加重风控标记，\n"
+      + "   建议固定一个 deviceId、每天最多试 1 次。"
+    );
+    return true;
+  }
   if (/未上传照片|photo_missing|未设置签到照片|照片池为空/.test(t)){
     alert(
       "未上传签到照片" + target + "\n\n"
