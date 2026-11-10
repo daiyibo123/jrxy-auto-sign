@@ -232,12 +232,15 @@ def write_account(name: str, user: dict, http_proxy: str = ""):
 
 def write_temp_account(name: str, user: dict, photo_override: str) -> str:
     """把账号配置写成临时副本（仅覆盖 photo），供引擎本次运行使用。
-    文件名以 _ 开头：list_accounts() 会跳过 _ 开头的文件，
-    因此不会被误当成新账号；valid_account_name 也拒绝 _ 开头，双重保险。运行完立即删除。"""
+
+    文件名用纯 ASCII（_tmp-<uuid>.yml）：避免中文账号名进入文件路径，
+    规避 Windows 下子进程/编码差异带来的读文件风险。
+    以 _ 开头还能让 list_accounts() 跳过它，不会被误认为新账号。
+    运行完立即删除。"""
     tmp_user = dict(user)
     tmp_user["photo"] = photo_override
     proxy = str(user.get("httpProxy", "") or "")
-    tmp = ACCOUNTS_DIR / ("_tmp-%s-%s.yml" % (name, uuid.uuid4().hex[:8]))
+    tmp = ACCOUNTS_DIR / ("_tmp-%s.yml" % uuid.uuid4().hex[:12])
     tmp.write_text(dump_account(tmp_user, proxy), encoding="utf-8")
     return str(tmp)
 
@@ -265,22 +268,23 @@ def mask_username(name: str) -> str:
         return name[0] + "***"
     return name[:4] + "***"
 
-# ---------------- 照片池（每个账号独立） ----------------
-LEGACY_POOL_DIR = PHOTO_POOL_DIR          # 旧版共享池，仅用于兼容读取
+# ---------------- 照片池（每个账号独立，无公共池） ----------------
 POOL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.\u4e00-\u9fa5]{1,32}$")
 
-def pool_dir(account: str = "") -> Path:
-    """返回某账号的照片池目录。account 为空时用共享池（兼容旧行为）。
+def pool_dir(account: str) -> Path:
+    """返回某账号的照片池目录。必须指定账号（无公共池）。
     账号名做白名单校验，杜绝 ../ 之类的路径穿越。"""
     account = (account or "").strip()
     if not account:
-        return PHOTO_POOL_DIR
+        raise HTTPException(status_code=400, detail="必须指定账号（每个账号有独立照片池）")
     if not POOL_NAME_RE.match(account) or account in (".", ".."):
         raise HTTPException(status_code=400, detail="账号名不合法")
     return PHOTO_POOL_DIR / account
 
-def list_pool_photos(account: str = "") -> list:
-    """列出照片池中的图片文件名（按名称排序）。account 为空时列共享池。"""
+def list_pool_photos(account: str) -> list:
+    """列出该账号照片池中的图片文件名（按名称排序）。"""
+    if not (account or "").strip():
+        return []
     d = pool_dir(account)
     if not d.is_dir():
         return []
@@ -291,43 +295,39 @@ def list_pool_photos(account: str = "") -> list:
             out.append(f)
     return out
 
-def pool_photo_count(account: str = "") -> int:
+def pool_photo_count(account: str) -> int:
     return len(list_pool_photos(account))
 
 def total_pool_count() -> int:
     """所有账号池的图片总数（用于总览显示）。"""
-    total = pool_photo_count("")
+    total = 0
     if PHOTO_POOL_DIR.is_dir():
         for f in os.listdir(PHOTO_POOL_DIR):
             p = PHOTO_POOL_DIR / f
             if p.is_dir() and POOL_NAME_RE.match(f):
-                total += pool_photo_count(f)
+                try:
+                    total += pool_photo_count(f)
+                except HTTPException:
+                    pass
     return total
 
 def pick_random_pool_photo(account: str = "") -> Optional[str]:
     """从该账号的照片池随机取一张，返回引擎可用的相对路径（相对 jrxy-engine/ 根目录）。
-    账号池为空时回退到共享池（兼容升级前上传的照片）；都没有则返回 None。"""
+    无公共池、无兜底：账号池为空则返回 None，由调用方拦截并提示。"""
+    if not account:
+        return None
     photos = list_pool_photos(account)
-    if photos:
-        if account:
-            return "../web-server/data/photo_pool/%s/%s" % (account, random.choice(photos))
-        return "../web-server/data/photo_pool/%s" % random.choice(photos)
-    # 账号池为空 → 回退共享池，避免升级后老照片取不到
-    if account:
-        legacy = list_pool_photos("")
-        if legacy:
-            log.info("账号 %s 的专属池为空，回退使用共享池照片", account)
-            return "../web-server/data/photo_pool/%s" % random.choice(legacy)
-    return None
+    if not photos:
+        return None
+    return "../web-server/data/photo_pool/%s/%s" % (account, random.choice(photos))
 
 def resolve_account_photo(user: dict, account: str = "") -> str:
     """决定本次运行实际使用的照片路径。
 
-    引擎只在任务 isPhoto==1 时才读照片，但那个值要登录后才知道。
-    为避免「配置里没填照片 → 引擎拿到空串 → 拼成目录 → PermissionError」，
-    这里保证能取到就取到一张，取不到才返回空串（由调用方拦截并提示）。
-
-    优先级：账号照片池随机 → 账号固定 photo → 共享池兜底。
+    规则（无兜底）：
+      - photoRandom=1 → 必须从该账号照片池随机取；池空则返回 ''
+      - 否则 → 用账号固定 photo
+    取不到就返回空串，由 run_account 拦截并提示用户去上传。
     """
     try:
         use_random = int(user.get("photoRandom", 0) or 0) == 1
@@ -335,38 +335,13 @@ def resolve_account_photo(user: dict, account: str = "") -> str:
         use_random = False
 
     fixed = str(user.get("photo", "") or "").strip()
-
     if use_random:
         picked = pick_random_pool_photo(account)
         if picked:
             return picked
-        log.warning("账号 %s 开启随机照片但池为空，回退固定照片 %s",
-                    account or "(共享池)", fixed or "(未设置)")
-        if fixed:
-            return fixed
-    else:
-        if fixed:
-            return fixed
-        # 没填固定照片：从该账号池兜底挑一张
-        picked = pick_random_pool_photo(account)
-        if picked:
-            log.info("账号 %s 未配置固定照片，自动使用照片池中的图片", account or "(共享池)")
-            return picked
-
-    return ""
-
-def resolve_photo_for_run(user: dict, account: str = "") -> str:
-    """运行前解析照片；池全空时再尝试共享池兜底，尽量避免空串进引擎。"""
-    photo = resolve_account_photo(user, account)
-    if photo:
-        return photo
-    legacy = list_pool_photos("")
-    if legacy and account:
-        log.info("账号 %s 各处都没有照片，使用共享池兜底", account)
-        return "../web-server/data/photo_pool/%s" % random.choice(legacy)
-    if legacy and not account:
-        return "../web-server/data/photo_pool/%s" % random.choice(legacy)
-    return ""
+        log.warning("账号 %s 开启随机照片，但其照片池为空", account or "(未知)")
+        return ""
+    return fixed
 
 def validate_photo_path(photo: str) -> Optional[str]:
     """校验 photo 是否为可用的图片文件。
@@ -375,11 +350,15 @@ def validate_photo_path(photo: str) -> Optional[str]:
     不存在的文件都会让引擎抛 PermissionError/FileNotFoundError。"""
     p = (photo or "").strip()
     if not p:
-        return "未设置签到照片，且照片池为空"
+        return "未设置签到照片"
     if not p.lower().endswith(PHOTO_EXTS):
         return "签到照片不是图片格式：%s" % p
-    # 相对 jrxy-engine/ 解析，与引擎 actions/utils.py 的拼法一致
-    resolved = (ENGINE_DIR / "actions" / ".." / p).resolve()
+    # 相对 jrxy-engine/ 解析，与引擎 actions/utils.py 的拼法一致。
+    # 用 resolve 做规范化，中文路径在 Windows 下同样可靠。
+    try:
+        resolved = (ENGINE_DIR / "actions" / ".." / p).resolve()
+    except (OSError, ValueError):
+        return "签到照片路径无法解析：%s" % p
     if not resolved.is_file():
         return "签到照片不存在：%s" % p
     return None
@@ -487,10 +466,16 @@ RESULT_LABELS = {
 
 def classify(out: str) -> str:
     """优先读引擎输出的 ###RESULT### 行；没有该行（超时/旧引擎）时回退关键词判断。"""
+    # FORCE_MOD_PASS：学校统一认证要求强制改密码，需给出可操作提示
+    if "FORCE_MOD_PASS" in out:
+        return "需要修改密码：请到学校统一认证平台重新登录并修改一次密码"
     res = parse_marker(out, "###RESULT###")
     if isinstance(res, dict) and res.get("status") in RESULT_LABELS:
         label = RESULT_LABELS[res["status"]]
         msg = str(res.get("msg", "")).strip()
+        # 照片缺失使用专门标签，便于前端提示
+        if res.get("kind") == "photo_missing":
+            return "未上传照片：请先在账号编辑页的照片池中上传至少一张照片"
         if res["status"] in ("already", "fail", "error") and msg:
             return msg[:100] if msg.startswith(label) else "%s：%s" % (label, msg[:80])
         return label
@@ -562,38 +547,35 @@ def run_account(name: str, dry: bool) -> str:
         did = ensure_device_id(name)
     except HTTPException as e:
         return str(e.detail)
-    # 运行前解析照片：只要池里有图就写进临时配置副本，
-    # 避免「配置里没填照片 → 引擎拿到空串 → 拼成目录 → PermissionError」。
-    # 临时副本不改动 accounts/*.yml。
+    # 运行前解析照片：photoRandom=1 时从该账号照片池随机取一张，
+    # 写进临时配置副本（不改动 accounts/*.yml）。
+    # 无公共池、无兜底：取不到就在下面拦截并提示。
     conf_path = str(yml)
     eff_photo = ""
     try:
         user, _ = read_account(name)
-        eff_photo = resolve_photo_for_run(user, name)
+        eff_photo = resolve_account_photo(user, name)
         if eff_photo and eff_photo != str(user.get("photo", "") or ""):
             tmp_conf = write_temp_account(name, user, eff_photo)
             conf_path = tmp_conf
-            log.info("账号 %s 本次使用照片: %s", name, eff_photo)
-        elif eff_photo:
-            eff_photo = str(user.get("photo", "") or "")
+            log.info("账号 %s 本次使用照片池随机照片: %s", name, eff_photo)
     except Exception as e:
         log.warning("准备照片失败，回退原配置: %s", e)
 
-    # 校验：引擎拿到空串/目录会抛 PermissionError，这里提前给出可读提示。
-    # 只要没有任何可用照片就拦截——因为无法预知任务 isPhoto 是否为 1。
+    # 校验：引擎拿到空串/目录会抛 PermissionError，这里提前拦截并给出可读提示。
+    # 无法预知任务 isPhoto 是否为 1，因此只要没有可用照片就直接返回错误。
     try:
-        if not eff_photo:
-            chk_user, _ = read_account(name)
-            eff_photo = str(chk_user.get("photo", "") or "")
         err = validate_photo_path(eff_photo)
         if err:
-            msg = ("当前没有可用的签到照片：%s\n\n"
-                   "本任务可能需要上传照片，若直接执行会失败。\n"
-                   "处理办法：编辑账号 → 签到照片 → 点「管理照片池」上传至少一张照片。"
+            msg = ("未上传签到照片：%s\n\n"
+                   "请先配置照片后再试：编辑账号 → 签到照片 → 点「管理照片池」"
+                   "上传至少一张照片；或勾选「从照片池中随机选择照片」。"
                    ) % err
             log.warning("账号 %s 照片校验未通过：%s", name, err)
+            save_log("照片检查[%s]" % name, "未上传照片", msg)
             return "###RESULT###" + json.dumps(
-                {"status": "error", "msg": msg}, ensure_ascii=False) + "\n" + msg
+                {"status": "error", "msg": msg, "kind": "photo_missing"},
+                ensure_ascii=False) + "\n" + msg
     except Exception as e:
         log.warning("照片校验异常（忽略，继续执行）: %s", e)
 
@@ -1305,10 +1287,10 @@ def api_account_photo(name: str, body: dict, _t: None = Depends(require_token)):
     save_log(f"账号[{name}] 照片", "签到照片已上传", "file=%s size=%dB" % (fname, len(raw)))
     return {"ok": True, "photo": user["photo"], "size": len(raw)}
 
-# ---------------- 照片池（每个账号独立） ----------------
+# ---------------- 照片池（每个账号独立，无公共池） ----------------
 @app.get("/api/photo-pool")
 def api_pool_list(account: str = "", _t: None = Depends(require_token)):
-    """列出照片池。account 为空时列共享池，否则列该账号的池。"""
+    """列出指定账号的照片池（account 必填）。"""
     d = pool_dir(account)
     photos = list_pool_photos(account)
     items = []
@@ -1317,9 +1299,8 @@ def api_pool_list(account: str = "", _t: None = Depends(require_token)):
             size = (d / f).stat().st_size
         except OSError:
             size = 0
-        url = "/api/photo-pool/file/" + urllib.parse.quote(f)
-        if account:
-            url += "?account=" + urllib.parse.quote(account)
+        url = ("/api/photo-pool/file/" + urllib.parse.quote(f)
+               + "?account=" + urllib.parse.quote(account))
         items.append({"name": f, "size": size, "url": url})
     return {"ok": True, "account": account, "dir": str(d),
             "count": len(items), "photos": items}

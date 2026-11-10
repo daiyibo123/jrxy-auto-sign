@@ -204,6 +204,19 @@
   .pool-drop-text{font-size:13px;color:var(--text)}
   .pool-link{color:var(--info);text-decoration:underline}
   .pool-drop-hint{font-size:11px;color:var(--faint);margin-top:4px}
+  /* 照片池卡片网格：竖屏照片按原始比例完整显示 */
+  .pool-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:12px;padding:12px}
+  .pool-card{display:flex;flex-direction:column;align-items:center;gap:9px;
+    background:var(--card2);border:1px solid var(--line);border-radius:10px;
+    padding:10px 10px 12px;min-width:0;transition:border-color .15s}
+  .pool-card:hover{border-color:var(--line2)}
+  .pool-thumb{width:100%;height:150px;display:flex;align-items:center;justify-content:center;
+    background:rgba(0,0,0,.22);border-radius:7px;overflow:hidden}
+  .pool-thumb img{max-width:100%;max-height:100%;width:auto;height:auto;
+    object-fit:contain;display:block}
+  .pool-name{font-size:11px;color:var(--muted);width:100%;text-align:center;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4;padding:0 2px}
+  .pool-card button.small{padding:6px 14px}
   /* 独立定时表：窄屏不压缩列，改为横向滚动（仅本功能新增表） */
   .per-acct-tbl{min-width:640px}
   .spinner{
@@ -477,7 +490,7 @@
     </div>
     <div class="tbl-scroll" style="max-height:300px;margin-top:12px">
       <table>
-        <thead><tr><th>预览</th><th>文件名</th><th>操作</th></tr></thead>
+        <thead style="display:none"><tr><th>预览</th><th>文件名</th><th>操作</th></tr></thead>
         <tbody id="poolBody"><tr><td colspan="3" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
       </table>
     </div>
@@ -619,6 +632,39 @@ function renderStatus(s){
     el("perAcctPanel").style.display = "";
     renderPerAcct();
   }
+}
+
+/* ================= 关键错误提示 ================= */
+/* 未上传照片 / 需要改密码：这类问题用户能自己解决，用弹窗明确指引，而不是只塞进结果框 */
+function showActionableError(text, who){
+  const t = String(text || "");
+  const target = who ? ("（" + who + "）") : "";
+  if (/FORCE_MOD_PASS|需要修改密码/.test(t)){
+    alert(
+      "需要修改密码" + target + "\n\n"
+      + "学校统一认证要求该账号强制修改一次密码，因此无法登录。\n\n"
+      + "请按以下步骤处理：\n"
+      + "1. 用浏览器打开学校统一认证平台，手动登录该账号\n"
+      + "2. 按提示修改一次密码\n"
+      + "3. 回到本页面：编辑账号 → 填入新密码 → 保存\n"
+      + "4. 再点「探测」验证是否正常"
+    );
+    return true;
+  }
+  if (/未上传照片|photo_missing|未设置签到照片|照片池为空/.test(t)){
+    alert(
+      "未上传签到照片" + target + "\n\n"
+      + "该签到任务需要提交照片，但当前账号还没有可用照片。\n\n"
+      + "请按以下步骤处理：\n"
+      + "1. 点击「编辑」打开该账号\n"
+      + "2. 在「签到照片」处点「管理照片池」\n"
+      + "3. 拖入或点选至少一张照片\n"
+      + "4. 勾选「从照片池中随机选择照片」后保存\n"
+      + "5. 再点「探测」验证"
+    );
+    return true;
+  }
+  return false;
 }
 
 /* ================= 账号列表 ================= */
@@ -790,7 +836,12 @@ async function runAccount(name, mode){
   try{
     const r = await api("/api/accounts/" + encodeURIComponent(name) + "/run", {method:"POST", body:JSON.stringify({mode})});
     showResult("resultBoxAcc", r);
-    toast(label + "：" + r.result, r.result.includes("失败")||r.result.includes("异常") ? "bad" : "ok");
+    const isBad = /失败|异常|需要修改密码|未上传照片/.test(r.result) || /未上传照片|FORCE_MOD_PASS|需要修改密码/.test(r.detail || "");
+    if (showActionableError((r.result || "") + "\n" + (r.detail || ""), name)) {
+      toast(label + "：需要先处理问题才能继续", "bad");
+    } else {
+      toast(label + "：" + r.result, isBad ? "bad" : "ok");
+    }
     loadLogs();
   }catch(e){
     if (e.message !== "unauthorized"){
@@ -811,7 +862,9 @@ async function batchRun(mode){
   try{
     const r = await api("/api/batch-run", {method:"POST", body:JSON.stringify({mode})});
     showResult("resultBoxBatch", r);
-    toast("批量" + (mode==="submit"?"签到":"探测") + "：" + r.result, r.result.includes("失败")||r.result.includes("异常") ? "bad" : "ok");
+    const acted = showActionableError((r.result || "") + "\n" + (r.detail || ""), "批量");
+    toast("批量" + (mode==="submit"?"签到":"探测") + "：" + r.result,
+      acted || r.result.includes("失败") || r.result.includes("异常") ? "bad" : "ok");
     loadLogs(); loadAccounts();
   }catch(e){
     if (e.message !== "unauthorized"){
@@ -1141,6 +1194,8 @@ function poolQS(){
   return a ? ("?account=" + encodeURIComponent(a)) : "";
 }
 async function loadPhotoPool(){
+  // 无公共照片池：未选中账号时不发请求
+  if (!poolAccount()){ poolCache = []; return []; }
   try{
     const r = await api("/api/photo-pool" + poolQS());
     poolCache = r.photos || [];
@@ -1212,14 +1267,22 @@ function renderPool(){
   const cnt = el("poolCountHint");
   if (cnt) cnt.textContent = "当前共 " + poolCache.length + " 张";
   if (!poolCache.length){
-    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">该账号的照片池为空，点击下方「添加照片」上传多张候选照片</td></tr>';
+    const hint = poolAccount()
+      ? '该账号还没有照片，拖入或点击上方区域上传'
+      : '请先在账号编辑窗中保存账号，再为它配置照片池';
+    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted);padding:22px">'
+      + hint + '</td></tr>';
     return;
   }
-  b.innerHTML = poolCache.map(p=>`<tr>
-    <td style="width:90px"><img src="${p.url}" alt="" style="width:64px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--line)"></td>
-    <td class="mono">${esc(p.name)}</td>
-    <td style="width:90px"><button class="danger small" onclick="deletePoolPhoto('${esc(p.name)}')">移除</button></td>
-  </tr>`).join("");
+  /* 卡片网格：竖屏照片完整显示，不裁切 */
+  b.innerHTML = '<tr><td colspan="3" style="padding:0;border:none">'
+    + '<div class="pool-grid">'
+    + poolCache.map(p=>`<div class="pool-card">
+        <div class="pool-thumb"><img src="${p.url}" alt="${esc(p.name)}" loading="lazy"></div>
+        <div class="pool-name mono" title="${esc(p.name)}">${esc(p.name)}</div>
+        <button class="danger small" onclick="deletePoolPhoto('${esc(p.name)}')">移除</button>
+      </div>`).join("")
+    + '</div></td></tr>';
 }
 async function deletePoolPhoto(name){
   if (!confirm("确定从照片池移除「" + name + "」？")) return;
