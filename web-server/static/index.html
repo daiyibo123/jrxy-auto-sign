@@ -463,8 +463,8 @@
 
 <div class="mask" id="poolMask">
   <div class="modal mid maxh">
-    <h3>照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
-    <p class="tag" style="margin-bottom:12px">支持拖入或点选上传，可一次多张；同名文件会覆盖。建议放几张不同角度/时间的照片，避免每次都是同一张。</p>
+    <h3 id="poolTitle">照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
+    <p class="tag" style="margin-bottom:12px" id="poolDesc">每个账号有独立的照片池，只对该账号生效。支持拖入或点选上传，可一次多张；同名文件会覆盖。</p>
     <div class="pool-drop" id="poolDrop">
       <div class="pool-drop-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
@@ -641,9 +641,11 @@ function renderAccounts(list){
     const sched = a.schedule_enabled
       ? '<span class="pill ok">' + esc(a.schedule_time || '-') + '</span>'
       : '<span style="color:var(--faint)">跟随全局</span>';
+    const pc = a.pool_count || 0;
     const photo = a.photo_random
-      ? '<span class="pill ok">照片池随机</span>'
-      : (a.photo ? '<span title="' + esc(a.photo) + '">固定</span>' : '<span style="color:var(--faint)">-</span>');
+      ? ('<span class="pill ok" title="本账号照片池共 ' + pc + ' 张">随机 ' + pc + ' 张</span>')
+      : (a.photo ? '<span title="' + esc(a.photo) + '">固定</span>'
+                 : '<span style="color:var(--faint)">' + (pc ? ("池 " + pc + " 张") : "-") + '</span>');
     return `<tr>
       <td><b>${esc(a.name)}</b>${a.password_set ? '' : '<br><span style="color:var(--warn);font-size:11px">未设密码</span>'}</td>
       <td>${esc(a.school || "-")}</td>
@@ -669,6 +671,9 @@ async function openAccountModal(name){
   const fields = ["mName","mSchool","mType","mUser","mPass","mProxy","mLon","mLat","mAddr","mAbn","mPhoto","mTitle","mDev","mNotifyMethod","mNotifyRcv"];
   fields.forEach(f => el(f).value = "");
   el("mPhotoRandom").checked = false;
+  // 先按当前账号加载照片池，再更新提示，避免显示上一个账号的缓存张数
+  poolCache = [];
+  loadPhotoPool().then(()=>{ updatePoolHint(); });
   updatePoolHint();
   el("mLoginState").className = "pill def"; el("mLoginState").textContent = "未测试";
   el("mRangeState").textContent = ""; el("amHint").textContent = "";
@@ -1127,20 +1132,33 @@ async function saveSchedule(){
 
 /* ================= 照片池 ================= */
 let poolCache = [];
+/* 当前照片池所属账号：空字符串表示共享池（仅在未选中账号时使用） */
+function poolAccount(){
+  return (typeof editingName === "string" && editingName) ? editingName : "";
+}
+function poolQS(){
+  const a = poolAccount();
+  return a ? ("?account=" + encodeURIComponent(a)) : "";
+}
 async function loadPhotoPool(){
   try{
-    const r = await api("/api/photo-pool");
+    const r = await api("/api/photo-pool" + poolQS());
     poolCache = r.photos || [];
     return poolCache;
   }catch(e){ poolCache = []; return []; }
 }
 function updatePoolHint(){
-  const n = (poolCache && poolCache.length) ? poolCache.length : (window.__poolCount || 0);
+  const n = (poolCache && poolCache.length) ? poolCache.length : 0;
   const box = el("mPoolHint");
   if (!box) return;
+  const acc = poolAccount();
+  if (!acc){
+    box.innerHTML = '请先保存账号，再为该账号配置照片池';
+    return;
+  }
   box.innerHTML = n
-    ? ('照片池共 <b>' + n + '</b> 张 · <a href="#" onclick="openPoolModal();return false">管理照片池</a>')
-    : ('照片池为空 · <a href="#" onclick="openPoolModal();return false">去添加照片</a>');
+    ? ('本账号照片池共 <b>' + n + '</b> 张 · <a href="#" onclick="openPoolModal();return false">管理照片池</a>')
+    : ('本账号照片池为空 · <a href="#" onclick="openPoolModal();return false">去添加照片</a>');
 }
 async function uploadPoolFiles(fileList){
   const files = Array.from(fileList || []);
@@ -1157,7 +1175,7 @@ async function uploadPoolFiles(fileList){
         r.onerror = () => rej(new Error("读取失败"));
         r.readAsDataURL(f);
       });
-      await api("/api/photo-pool", {method:"POST", body:JSON.stringify({name: f.name, data})});
+      await api("/api/photo-pool" + poolQS(), {method:"POST", body:JSON.stringify({name: f.name, data})});
       ok++;
     }catch(e){ fail++; }
   }
@@ -1172,6 +1190,19 @@ async function uploadPoolPhotos(ev){
   fi.value = "";
 }
 function openPoolModal(){
+  const acc = poolAccount();
+  const title = el("poolTitle");
+  if (title){
+    title.innerHTML = acc
+      ? ('照片池 · <b style="color:var(--info)">' + esc(acc) + '</b> <span class="tag" style="margin-left:8px">该池只对此账号生效</span>')
+      : '照片池 <span class="tag" style="margin-left:8px">未选择账号</span>';
+  }
+  const desc = el("poolDesc");
+  if (desc){
+    desc.textContent = acc
+      ? '当前为「' + acc + '」的专属照片池，其他账号不受影响。支持拖入或点选上传，可一次多张；同名文件会覆盖。'
+      : '请先在账号编辑窗中保存账号，再为该账号配置照片池。';
+  }
   el("poolMask").classList.add("show");
   loadPhotoPool().then(()=>{ renderPool(); });
 }
@@ -1181,7 +1212,7 @@ function renderPool(){
   const cnt = el("poolCountHint");
   if (cnt) cnt.textContent = "当前共 " + poolCache.length + " 张";
   if (!poolCache.length){
-    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">照片池为空，点击下方「添加照片」上传多张候选照片</td></tr>';
+    b.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--muted)">该账号的照片池为空，点击下方「添加照片」上传多张候选照片</td></tr>';
     return;
   }
   b.innerHTML = poolCache.map(p=>`<tr>
@@ -1193,7 +1224,7 @@ function renderPool(){
 async function deletePoolPhoto(name){
   if (!confirm("确定从照片池移除「" + name + "」？")) return;
   try{
-    await api("/api/photo-pool/" + encodeURIComponent(name), {method:"DELETE"});
+    await api("/api/photo-pool/" + encodeURIComponent(name) + poolQS(), {method:"DELETE"});
     await loadPhotoPool(); renderPool(); updatePoolHint();
     toast("已移除", "ok");
   }catch(e){ toast("移除失败：" + e.message, "bad"); }

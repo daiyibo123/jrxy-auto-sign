@@ -265,38 +265,68 @@ def mask_username(name: str) -> str:
         return name[0] + "***"
     return name[:4] + "***"
 
-# ---------------- 照片池 ----------------
-def list_pool_photos() -> list:
-    """列出照片池中的图片文件名（按名称排序）。"""
-    if not PHOTO_POOL_DIR.is_dir():
+# ---------------- 照片池（每个账号独立） ----------------
+LEGACY_POOL_DIR = PHOTO_POOL_DIR          # 旧版共享池，仅用于兼容读取
+POOL_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.\u4e00-\u9fa5]{1,32}$")
+
+def pool_dir(account: str = "") -> Path:
+    """返回某账号的照片池目录。account 为空时用共享池（兼容旧行为）。
+    账号名做白名单校验，杜绝 ../ 之类的路径穿越。"""
+    account = (account or "").strip()
+    if not account:
+        return PHOTO_POOL_DIR
+    if not POOL_NAME_RE.match(account) or account in (".", ".."):
+        raise HTTPException(status_code=400, detail="账号名不合法")
+    return PHOTO_POOL_DIR / account
+
+def list_pool_photos(account: str = "") -> list:
+    """列出照片池中的图片文件名（按名称排序）。account 为空时列共享池。"""
+    d = pool_dir(account)
+    if not d.is_dir():
         return []
     out = []
-    for f in sorted(os.listdir(PHOTO_POOL_DIR)):
-        p = PHOTO_POOL_DIR / f
+    for f in sorted(os.listdir(d)):
+        p = d / f
         if p.is_file() and f.lower().endswith(PHOTO_EXTS):
             out.append(f)
     return out
 
-def pick_random_pool_photo() -> Optional[str]:
-    """从照片池随机取一张，返回引擎可用的相对路径（相对 jrxy-engine/ 根目录）。
+def pool_photo_count(account: str = "") -> int:
+    return len(list_pool_photos(account))
+
+def total_pool_count() -> int:
+    """所有账号池的图片总数（用于总览显示）。"""
+    total = pool_photo_count("")
+    if PHOTO_POOL_DIR.is_dir():
+        for f in os.listdir(PHOTO_POOL_DIR):
+            p = PHOTO_POOL_DIR / f
+            if p.is_dir() and POOL_NAME_RE.match(f):
+                total += pool_photo_count(f)
+    return total
+
+def pick_random_pool_photo(account: str = "") -> Optional[str]:
+    """从该账号的照片池随机取一张，返回引擎可用的相对路径（相对 jrxy-engine/ 根目录）。
     池为空时返回 None，调用方应回退到账号原有 photo。"""
-    photos = list_pool_photos()
+    photos = list_pool_photos(account)
     if not photos:
         return None
+    if account:
+        return "../web-server/data/photo_pool/%s/%s" % (account, random.choice(photos))
     return "../web-server/data/photo_pool/%s" % random.choice(photos)
 
-def resolve_account_photo(user: dict) -> str:
+def resolve_account_photo(user: dict, account: str = "") -> str:
     """决定本次运行实际使用的照片路径。
-    photoRandom=1 且照片池非空时随机取一张；否则用账号固定 photo。"""
+    photoRandom=1 且该账号照片池非空时随机取一张；否则用账号固定 photo。"""
     try:
         use_random = int(user.get("photoRandom", 0) or 0) == 1
     except (TypeError, ValueError):
         use_random = False
     if use_random:
-        picked = pick_random_pool_photo()
+        picked = pick_random_pool_photo(account)
         if picked:
             return picked
-        log.warning("账号开启随机照片，但照片池为空，回退使用 %s", user.get("photo") or "(未设置)")
+        log.warning("账号 %s 开启随机照片，但其照片池为空，回退使用 %s",
+                    account or "(共享池)", user.get("photo") or "(未设置)")
     return str(user.get("photo", "") or "")
 
 # ---------------- 高德地图配置 ----------------
@@ -362,6 +392,7 @@ def account_summary(name: str) -> dict:
         "address": user.get("address", ""),
         "photo": user.get("photo", ""),
         "photo_random": int(user.get("photoRandom", 0) or 0) == 1,
+        "pool_count": pool_photo_count(name),
         "password_set": bool(user.get("password")),
         "device_id": dev or "（未设置，首次运行自动生成）",
         # 按账号独立定时
@@ -476,12 +507,13 @@ def run_account(name: str, dry: bool) -> str:
         did = ensure_device_id(name)
     except HTTPException as e:
         return str(e.detail)
-    # 开启“照片池随机”时，把随机选中的照片写进临时配置副本，避免污染 accounts/*.yml
+    # 开启“照片池随机”时，从该账号自己的照片池随机取一张，
+    # 写进临时配置副本，避免污染 accounts/*.yml
     conf_path = str(yml)
     try:
         user, _ = read_account(name)
         if int(user.get("photoRandom", 0) or 0) == 1:
-            picked = resolve_account_photo(user)
+            picked = resolve_account_photo(user, name)
             if picked and picked != str(user.get("photo", "") or ""):
                 tmp_conf = write_temp_account(name, user, picked)
                 conf_path = tmp_conf
@@ -948,7 +980,8 @@ def api_status(_t: None = Depends(require_token)):
             "last_result": scheduler_state.get("last_result"),
         },
         "per_account_schedules": per_account_schedules(),
-        "photo_pool": {"count": len(list_pool_photos()), "dir": str(PHOTO_POOL_DIR)},
+        "photo_pool": {"count": total_pool_count(), "dir": str(PHOTO_POOL_DIR),
+                       "per_account": {n: pool_photo_count(n) for n in list_accounts()}},
         "amap": {"enabled": bool(load_amap_conf()["key"])},
         "server_time": now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": "UTC%+g" % TZ_OFFSET,
@@ -1195,31 +1228,39 @@ def api_account_photo(name: str, body: dict, _t: None = Depends(require_token)):
     save_log(f"账号[{name}] 照片", "签到照片已上传", "file=%s size=%dB" % (fname, len(raw)))
     return {"ok": True, "photo": user["photo"], "size": len(raw)}
 
-# ---------------- 照片池 ----------------
+# ---------------- 照片池（每个账号独立） ----------------
 @app.get("/api/photo-pool")
-def api_pool_list(_t: None = Depends(require_token)):
-    photos = list_pool_photos()
+def api_pool_list(account: str = "", _t: None = Depends(require_token)):
+    """列出照片池。account 为空时列共享池，否则列该账号的池。"""
+    d = pool_dir(account)
+    photos = list_pool_photos(account)
     items = []
     for f in photos:
         try:
-            size = (PHOTO_POOL_DIR / f).stat().st_size
+            size = (d / f).stat().st_size
         except OSError:
             size = 0
-        items.append({"name": f, "size": size, "url": "/api/photo-pool/file/" + urllib.parse.quote(f)})
-    return {"ok": True, "dir": str(PHOTO_POOL_DIR), "count": len(items), "photos": items}
+        url = "/api/photo-pool/file/" + urllib.parse.quote(f)
+        if account:
+            url += "?account=" + urllib.parse.quote(account)
+        items.append({"name": f, "size": size, "url": url})
+    return {"ok": True, "account": account, "dir": str(d),
+            "count": len(items), "photos": items}
 
 @app.get("/api/photo-pool/file/{fname}")
-def api_pool_file(fname: str, _t: None = Depends(require_token)):
+def api_pool_file(fname: str, account: str = "", _t: None = Depends(require_token)):
     """预览照片池中的单张图片。"""
+    d = pool_dir(account)
     safe = os.path.basename(fname)
-    p = PHOTO_POOL_DIR / safe
+    p = d / safe
     if not safe or not p.is_file() or not safe.lower().endswith(PHOTO_EXTS):
         raise HTTPException(status_code=404, detail="照片不存在")
     return FileResponse(p)
 
 @app.post("/api/photo-pool")
-def api_pool_upload(body: dict, _t: None = Depends(require_token)):
-    """上传一张图片到照片池。"""
+def api_pool_upload(body: dict, account: str = "", _t: None = Depends(require_token)):
+    """上传一张图片到照片池（account 为空则进共享池）。"""
+    d = pool_dir(account)
     fname = os.path.basename(str(body.get("name", "")).strip())
     data = str(body.get("data", ""))
     if not fname or not data:
@@ -1234,20 +1275,26 @@ def api_pool_upload(body: dict, _t: None = Depends(require_token)):
         raise HTTPException(status_code=400, detail="图片内容为空")
     if len(raw) > 5 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="图片不能超过 5MB")
-    target = PHOTO_POOL_DIR / fname
+    d.mkdir(parents=True, exist_ok=True)
+    target = d / fname
     target.write_bytes(raw)
-    save_log("照片池", "照片已加入池", "file=%s size=%dB 当前共 %d 张" % (fname, len(raw), len(list_pool_photos())))
-    return {"ok": True, "name": fname, "size": len(raw), "count": len(list_pool_photos())}
+    cnt = len(list_pool_photos(account))
+    save_log("照片池[%s]" % (account or "共享"), "照片已加入池",
+             "file=%s size=%dB 该池共 %d 张" % (fname, len(raw), cnt))
+    return {"ok": True, "name": fname, "size": len(raw), "count": cnt}
 
 @app.delete("/api/photo-pool/{fname}")
-def api_pool_delete(fname: str, _t: None = Depends(require_token)):
+def api_pool_delete(fname: str, account: str = "", _t: None = Depends(require_token)):
+    d = pool_dir(account)
     safe = os.path.basename(fname)
-    p = PHOTO_POOL_DIR / safe
+    p = d / safe
     if not safe or not p.is_file() or not safe.lower().endswith(PHOTO_EXTS):
         raise HTTPException(status_code=404, detail="照片不存在")
     p.unlink()
-    save_log("照片池", "照片已移除", "file=%s 剩余 %d 张" % (safe, len(list_pool_photos())))
-    return {"ok": True, "count": len(list_pool_photos())}
+    cnt = len(list_pool_photos(account))
+    save_log("照片池[%s]" % (account or "共享"), "照片已移除",
+             "file=%s 剩余 %d 张" % (safe, cnt))
+    return {"ok": True, "count": cnt}
 
 # ---------------- 高德地图选点配置 ----------------
 @app.get("/api/amap-config")
