@@ -663,11 +663,27 @@ def _wait_until(t: datetime):
         time.sleep(min(left, 30))
 
 # ---------------- 按账号独立定时 ----------------
+_per_sched_cache = {"_sig": None, "data": {}}
+
 def per_account_schedules() -> dict:
     """返回 {账号名: "HH:MM"}，仅含开启了“独立定时”且时间合法的账号。
-    这些账号不再跟随全局定时，改用自己的时间点。"""
+    这些账号不再跟随全局定时，改用自己的时间点。
+    结果按“账号文件名 + mtime”做签名缓存：账号未变更时不重复解析 yml。
+    （/api/status 每 60 秒轮询、调度器每轮循环都会调用本函数）"""
+    names = list_accounts()
+    sig = []
+    for nm in names:
+        try:
+            sig.append((nm, (ACCOUNTS_DIR / (nm + ".yml")).stat().st_mtime_ns))
+        except OSError:
+            sig.append((nm, 0))
+    sig = tuple(sig)
+    cache = _per_sched_cache
+    if cache.get("_sig") == sig:
+        return dict(cache["data"])
+
     out = {}
-    for nm in list_accounts():
+    for nm in names:
         try:
             user, _ = read_account(nm)
         except Exception:
@@ -684,6 +700,8 @@ def per_account_schedules() -> dict:
         except ValueError:
             continue
         out[nm] = tm
+    cache["_sig"] = sig
+    cache["data"] = dict(out)
     return out
 
 def _acct_slot_state() -> dict:
