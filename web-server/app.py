@@ -306,17 +306,24 @@ def total_pool_count() -> int:
 
 def pick_random_pool_photo(account: str = "") -> Optional[str]:
     """从该账号的照片池随机取一张，返回引擎可用的相对路径（相对 jrxy-engine/ 根目录）。
-    池为空时返回 None，调用方应回退到账号原有 photo。"""
+    账号池为空时回退到共享池（兼容升级前上传的照片）；都没有则返回 None。"""
     photos = list_pool_photos(account)
-    if not photos:
-        return None
+    if photos:
+        if account:
+            return "../web-server/data/photo_pool/%s/%s" % (account, random.choice(photos))
+        return "../web-server/data/photo_pool/%s" % random.choice(photos)
+    # 账号池为空 → 回退共享池，避免升级后老照片取不到
     if account:
-        return "../web-server/data/photo_pool/%s/%s" % (account, random.choice(photos))
-    return "../web-server/data/photo_pool/%s" % random.choice(photos)
+        legacy = list_pool_photos("")
+        if legacy:
+            log.info("账号 %s 的专属池为空，回退使用共享池照片", account)
+            return "../web-server/data/photo_pool/%s" % random.choice(legacy)
+    return None
 
 def resolve_account_photo(user: dict, account: str = "") -> str:
     """决定本次运行实际使用的照片路径。
-    photoRandom=1 且该账号照片池非空时随机取一张；否则用账号固定 photo。"""
+    photoRandom=1 时从该账号照片池随机取（空了回退共享池）；
+    取不到任何池照片则用账号固定 photo。"""
     try:
         use_random = int(user.get("photoRandom", 0) or 0) == 1
     except (TypeError, ValueError):
@@ -325,9 +332,25 @@ def resolve_account_photo(user: dict, account: str = "") -> str:
         picked = pick_random_pool_photo(account)
         if picked:
             return picked
-        log.warning("账号 %s 开启随机照片，但其照片池为空，回退使用 %s",
+        log.warning("账号 %s 开启随机照片，但照片池为空，回退使用 %s",
                     account or "(共享池)", user.get("photo") or "(未设置)")
     return str(user.get("photo", "") or "")
+
+def validate_photo_path(photo: str) -> Optional[str]:
+    """校验 photo 是否为可用的图片文件。
+    返回 None 表示可用；否则返回错误说明。
+    引擎会把它拼成 actions/../<photo> 再 open()，所以空串、目录、
+    不存在的文件都会让引擎抛 PermissionError/FileNotFoundError。"""
+    p = (photo or "").strip()
+    if not p:
+        return "未设置签到照片，且照片池为空"
+    if not p.lower().endswith(PHOTO_EXTS):
+        return "签到照片不是图片格式：%s" % p
+    # 相对 jrxy-engine/ 解析，与引擎 actions/utils.py 的拼法一致
+    resolved = (ENGINE_DIR / "actions" / ".." / p).resolve()
+    if not resolved.is_file():
+        return "签到照片不存在：%s" % p
+    return None
 
 # ---------------- 高德地图配置 ----------------
 def load_amap_conf() -> dict:
@@ -520,6 +543,31 @@ def run_account(name: str, dry: bool) -> str:
                 log.info("账号 %s 使用照片池随机照片: %s", name, picked)
     except Exception as e:
         log.warning("准备随机照片失败，回退原配置: %s", e)
+
+    # 提前校验照片：引擎拿到空串/目录会抛 PermissionError，这里给出可读提示。
+    # 仅在该账号确实会用到照片时才拦截（勾了随机，或已配置 photo）。
+    try:
+        chk_user, _ = read_account(name)
+        eff_photo = chk_user.get("photo", "") or ""
+        wants_photo = bool(int(chk_user.get("photoRandom", 0) or 0)) or bool(eff_photo)
+        if conf_path != str(yml):
+            # 已写入临时配置，以临时配置里的照片路径为准
+            for line in Path(conf_path).read_text(encoding="utf-8").splitlines():
+                if line.strip().startswith("photo:"):
+                    eff_photo = line.split(":", 1)[1].strip().strip("'\"")
+                    break
+        if wants_photo:
+            err = validate_photo_path(eff_photo)
+            if err:
+                msg = ("签到需要照片，但当前照片不可用：%s\n\n"
+                       "处理办法：编辑账号 → 签到照片 → 点「管理照片池」上传照片，"
+                       "或取消「从照片池中随机选择照片」后直接指定文件名。") % err
+                log.warning("账号 %s 照片校验未通过：%s", name, err)
+                return "###RESULT###" + json.dumps(
+                    {"status": "error", "msg": msg}, ensure_ascii=False) + "\n" + msg
+    except Exception as e:
+        log.warning("照片校验异常（忽略，继续执行）: %s", e)
+
     cmd = [str(ENGINE_PY), "-W", "ignore", str(SUBMIT_SCRIPT),
            "--dry" if dry else "--submit",
            "--variant", "fkey_cat", "--protocol", "ios",
