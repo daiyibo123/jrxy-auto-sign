@@ -191,6 +191,19 @@
   .modal.maxh{max-height:92vh;overflow:auto}
   .modal h3{font-size:16px;margin-bottom:10px}
   .modal p{color:var(--muted);font-size:13px;margin-bottom:16px}
+  /* 照片池拖入区（仅本功能新增，沿用现有配色与圆角） */
+  .pool-drop{
+    border:1.5px dashed var(--line2);border-radius:12px;padding:20px 16px;text-align:center;
+    background:rgba(255,255,255,.02);cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .pool-drop:hover{border-color:var(--info);background:rgba(56,189,248,.05)}
+  .pool-drop.dragover{border-color:var(--ac1);background:rgba(20,184,166,.10)}
+  .pool-drop-icon{color:var(--muted);line-height:0;margin-bottom:6px}
+  .pool-drop.dragover .pool-drop-icon{color:var(--ac1)}
+  .pool-drop-text{font-size:13px;color:var(--text)}
+  .pool-link{color:var(--info);text-decoration:underline}
+  .pool-drop-hint{font-size:11px;color:var(--faint);margin-top:4px}
   .spinner{
     display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);
     border-top-color:var(--text);border-radius:50%;animation:spin .8s linear infinite;
@@ -296,7 +309,7 @@
     <div id="perAcctPanel" style="display:none;margin-top:12px">
       <div class="tbl-scroll">
         <table>
-          <thead><tr><th style="width:190px">账号</th><th style="width:150px">独立定时</th><th style="width:170px">时间（HH:MM）</th><th>下次执行</th><th style="width:150px">操作</th></tr></thead>
+          <thead><tr><th style="width:180px">账号</th><th style="width:130px">独立定时</th><th style="width:200px">时间（HH:MM）</th><th>下次执行</th><th style="width:140px">操作</th></tr></thead>
           <tbody id="perAcctBody"><tr><td colspan="5" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
         </table>
       </div>
@@ -376,10 +389,10 @@
           <div class="field"><label>定位地址文本</label><input type="text" id="mAddr" placeholder="签到点地址"></div>
           <button class="primary" onclick="signRangeAcc()">从服务器获取签到范围</button>
         </div>
-        <div class="row">
-          <button class="ghost" type="button" onclick="openMapPicker()">🗺 地图选点</button>
-          <button class="ghost" type="button" onclick="useMyLocation()">📍 用浏览器定位</button>
-          <button class="ghost" type="button" onclick="openAmapConfig()">⚙ 高德 Key 配置</button>
+        <div class="row" style="align-items:center">
+          <button class="ghost small" type="button" onclick="openMapPicker()">地图选点</button>
+          <button class="ghost small" type="button" onclick="useMyLocation()">用浏览器定位</button>
+          <button class="ghost small" type="button" onclick="openAmapConfig()">高德 Key 配置</button>
           <span class="tag" id="mMapState">地图选点：未启用（需配置高德 Key）</span>
         </div>
         <div class="row"><span class="tag" id="mRangeState"></span></div>
@@ -395,11 +408,11 @@
               <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
               <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
             </div>
-            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px;font-size:12px;color:var(--muted)">
-              <input type="checkbox" id="mPhotoRandom" style="width:15px;height:15px">
+            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-top:2px;font-size:12px;color:var(--muted);font-weight:400">
+              <input type="checkbox" id="mPhotoRandom" style="width:14px;height:14px;margin:0">
               从照片池中随机选择照片
             </label>
-            <div style="margin-top:6px;font-size:12px;color:var(--faint)" id="mPoolHint">照片池：加载中…</div>
+            <div class="hint" id="mPoolHint" style="margin-top:0">照片池：加载中…</div>
           </div>
           <div class="field"><label>表单标题校验</label>
             <select id="mTitle">
@@ -444,10 +457,19 @@
 
 <div class="mask" id="poolMask">
   <div class="modal mid maxh">
-
     <h3>照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
-    <p class="tag" style="margin-bottom:12px">支持一次多选上传；同名文件会覆盖。建议放几张不同角度/时间的照片，避免每次都是同一张。</p>
-    <div class="tbl-scroll" style="max-height:340px">
+    <p class="tag" style="margin-bottom:12px">支持拖入或点选上传，可一次多张；同名文件会覆盖。建议放几张不同角度/时间的照片，避免每次都是同一张。</p>
+    <div class="pool-drop" id="poolDrop">
+      <div class="pool-drop-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4M12 4l-4 4M12 4l4 4"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+        </svg>
+      </div>
+      <div class="pool-drop-text">把照片拖到这里，或 <span class="pool-link">点击选择</span></div>
+      <div class="pool-drop-hint">支持 jpg / png / webp / gif，单张不超过 5MB</div>
+      <input type="file" id="poolFile" accept="image/*" multiple style="display:none">
+    </div>
+    <div class="tbl-scroll" style="max-height:300px;margin-top:12px">
       <table>
         <thead><tr><th>预览</th><th>文件名</th><th>操作</th></tr></thead>
         <tbody id="poolBody"><tr><td colspan="3" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
@@ -455,7 +477,6 @@
     </div>
     <div class="row" style="margin-top:12px">
       <button class="primary" onclick="el('poolFile').click()">＋ 添加照片</button>
-      <input type="file" id="poolFile" accept="image/*" multiple style="display:none">
       <button class="ghost" onclick="closePoolModal()">关闭</button>
       <span class="tag" id="poolCountHint"></span>
     </div>
@@ -470,8 +491,8 @@
         <label>搜索地点</label>
         <input type="text" id="mapSearch" placeholder="输入地点名称，如 大连大学北区，回车搜索">
       </div>
-      <button class="ghost" type="button" onclick="mapSearchPlace()">搜索</button>
-      <button class="ghost" type="button" onclick="mapUseMyLocation()">用我的位置</button>
+      <button class="ghost small" type="button" onclick="mapSearchPlace()">搜索</button>
+      <button class="ghost small" type="button" onclick="mapUseMyLocation()">用我的位置</button>
       <span class="tag" id="mapTip"></span>
     </div>
     <div id="mapContainer" style="width:100%;height:420px;border-radius:10px;border:1px solid var(--line);background:#0b1220;overflow:hidden"></div>
@@ -1115,9 +1136,8 @@ function updatePoolHint(){
     ? ('照片池共 <b>' + n + '</b> 张 · <a href="#" onclick="openPoolModal();return false">管理照片池</a>')
     : ('照片池为空 · <a href="#" onclick="openPoolModal();return false">去添加照片</a>');
 }
-async function uploadPoolPhotos(ev){
-  const fi = ev.target;
-  const files = Array.from(fi.files || []);
+async function uploadPoolFiles(fileList){
+  const files = Array.from(fileList || []);
   if (!files.length) return;
   let ok = 0, fail = 0;
   for (const f of files){
@@ -1135,11 +1155,15 @@ async function uploadPoolPhotos(ev){
       ok++;
     }catch(e){ fail++; }
   }
-  fi.value = "";
   await loadPhotoPool();
   renderPool();
   updatePoolHint();
   toast("照片池：成功 " + ok + " 张" + (fail ? ("，失败 " + fail + " 张") : ""), ok ? "ok" : "bad");
+}
+async function uploadPoolPhotos(ev){
+  const fi = ev.target;
+  await uploadPoolFiles(fi.files);
+  fi.value = "";
 }
 function openPoolModal(){
   el("poolMask").classList.add("show");
@@ -1194,7 +1218,7 @@ async function renderPerAcct(){
       <td><b>${esc(a.name)}</b></td>
       <td><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
         <input type="checkbox" style="width:15px;height:15px" ${on?"checked":""} onchange="savePerAcct('${esc(a.name)}', this.checked, '${esc(t)}')"> 独立定时</label></td>
-      <td><input type="time" value="${esc(t)}" style="width:130px" onchange="savePerAcct('${esc(a.name)}', ${on}, this.value)"></td>
+      <td><input type="time" value="${esc(t)}" style="width:100%;min-width:150px" onchange="savePerAcct('${esc(a.name)}', ${on}, this.value)"></td>
       <td class="mono">${on && t ? esc(t) + ' 每天' : '<span style="color:var(--faint)">跟随全局</span>'}</td>
       <td><button class="ghost small" onclick="savePerAcct('${esc(a.name)}', true, '${esc(t||'22:05')}')">启用</button>
           <button class="ghost small" onclick="savePerAcct('${esc(a.name)}', false, '${esc(t)}')">停用</button></td>
@@ -1309,6 +1333,29 @@ el("mapMask").addEventListener("click", e=>{ if (e.target === el("mapMask")) clo
 el("amapCfgMask").addEventListener("click", e=>{ if (e.target === el("amapCfgMask")) closeAmapConfig(); });
 el("mPhotoFile").addEventListener("change", uploadPhotoAcc);
 el("poolFile").addEventListener("change", uploadPoolPhotos);
+/* 照片池拖入上传 */
+(function bindPoolDrop(){
+  const drop = el("poolDrop");
+  const input = el("poolFile");
+  if (!drop || !input) return;
+  drop.addEventListener("click", () => input.click());
+  let depth = 0;
+  const enter = e => { e.preventDefault(); e.stopPropagation(); depth++; drop.classList.add("dragover"); };
+  const leave = e => { e.preventDefault(); e.stopPropagation(); depth = Math.max(0, depth-1); if (!depth) drop.classList.remove("dragover"); };
+  ["dragenter"].forEach(t => drop.addEventListener(t, enter));
+  ["dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); e.stopPropagation(); }));
+  ["dragleave"].forEach(t => drop.addEventListener(t, leave));
+  ["drop"].forEach(t => drop.addEventListener(t, e => {
+    e.preventDefault(); e.stopPropagation();
+    depth = 0; drop.classList.remove("dragover");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) uploadPoolFiles(files);
+  }));
+  // 防止浏览器默认打开被拖入的文件
+  ["dragover","drop"].forEach(t => window.addEventListener(t, e => {
+    if (el("poolMask").classList.contains("show")) e.preventDefault();
+  }));
+})();
 el("mapSearch").addEventListener("keydown", e=>{ if (e.key === "Enter"){ e.preventDefault(); mapSearchPlace(); } });
 setInterval(()=>{ api("/api/status").then(renderStatus).catch(()=>{}); }, 60000);
 setInterval(()=>{ loadLogs(); }, 30000);

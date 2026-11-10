@@ -56,5 +56,28 @@ install.bat
 
 # ===== 临时配置文件（照片池随机时生成，异常退出可能残留）=====
 accounts/_tmp-*.yml
+account/_tmp-*.yml
 *.tmp
+*.bak
+
+# ===== 其他可能含隐私的入口 =====
+# 任意层级下的高德/账号配置副本（例如手工备份）
+**/amap*.json
+**/credentials*.json
+**/webtoken*.txt
+**/web_token.txt
+# 照片与截图：根目录及常见上传位置（防止手动放到项目根被提交）
+/*.jpg
+/*.jpeg
+/*.png
+/*.webp
+/*.gif
+# 日志与数据库
+*.db
+*.sqlite
+*.sqlite3
+# 本地环境变量文件（可能放 Key / 密码）
+.env
+.env.*
+!.env.example
 
