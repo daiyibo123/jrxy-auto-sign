@@ -75,6 +75,8 @@ INDEX_HTML = STATIC_DIR / "index.html"
 PHOTO_POOL_DIR = Path(os.getenv("JRXY_PHOTO_POOL_DIR", str(DATA_DIR / "photo_pool")))
 PHOTO_POOL_DIR.mkdir(parents=True, exist_ok=True)
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+# 高德地图配置：保存 JS API Key 与安全密钥（留空则不启用地图选点）
+AMAP_CONF_PATH = DATA_DIR / "amap.json"
 
 IS_WIN = os.name == "nt"
 ENGINE_PY = ENGINE_DIR / (".venv/Scripts/python.exe" if IS_WIN else ".venv/bin/python")
@@ -278,6 +280,36 @@ def resolve_account_photo(user: dict) -> str:
             return picked
         log.warning("账号开启随机照片，但照片池为空，回退使用 %s", user.get("photo") or "(未设置)")
     return str(user.get("photo", "") or "")
+
+# ---------------- 高德地图配置 ----------------
+def load_amap_conf() -> dict:
+    """读取高德配置。key/securityJsCode 留空表示未启用地图选点。
+    也支持用环境变量 AMAP_KEY / AMAP_SECURITY_CODE 覆盖（便于容器部署）。"""
+    conf = {"key": "", "securityJsCode": "", "webKey": ""}
+    if AMAP_CONF_PATH.exists():
+        try:
+            d = json.loads(AMAP_CONF_PATH.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                for k in conf:
+                    conf[k] = str(d.get(k, "") or "")
+        except Exception as e:
+            log.warning("读取 amap.json 失败: %s", e)
+    env_key = os.getenv("AMAP_KEY", "").strip()
+    env_sec = os.getenv("AMAP_SECURITY_CODE", "").strip()
+    env_web = os.getenv("AMAP_WEB_KEY", "").strip()
+    if env_key:
+        conf["key"] = env_key
+    if env_sec:
+        conf["securityJsCode"] = env_sec
+    if env_web:
+        conf["webKey"] = env_web
+    return conf
+
+def save_amap_conf(conf: dict):
+    data = {k: str(conf.get(k, "") or "") for k in ("key", "securityJsCode", "webKey")}
+    tmp = AMAP_CONF_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, AMAP_CONF_PATH)
 
 def normalize_optional_num(v, default=None):
     """数字字段：空串/None → default；否则 float。"""
@@ -869,6 +901,7 @@ def api_status(_t: None = Depends(require_token)):
         },
         "per_account_schedules": per_account_schedules(),
         "photo_pool": {"count": len(list_pool_photos()), "dir": str(PHOTO_POOL_DIR)},
+        "amap": {"enabled": bool(load_amap_conf()["key"])},
         "server_time": now().strftime("%Y-%m-%d %H:%M:%S"),
         "timezone": "UTC%+g" % TZ_OFFSET,
         "system_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1167,6 +1200,72 @@ def api_pool_delete(fname: str, _t: None = Depends(require_token)):
     p.unlink()
     save_log("照片池", "照片已移除", "file=%s 剩余 %d 张" % (safe, len(list_pool_photos())))
     return {"ok": True, "count": len(list_pool_photos())}
+
+# ---------------- 高德地图选点配置 ----------------
+@app.get("/api/amap-config")
+def api_amap_get(_t: None = Depends(require_token)):
+    """返回高德配置。key 回传给前端用于加载 JS API（JS Key 本就是公开给浏览器用的），
+    webKey 只回传“是否已配置”，不回传明文，避免不必要的暴露。"""
+    conf = load_amap_conf()
+    return {
+        "ok": True,
+        "key": conf["key"],
+        "securityJsCode": conf["securityJsCode"],
+        "webKey_set": bool(conf["webKey"]),
+        "enabled": bool(conf["key"]),
+        "hint": "" if conf["key"] else "尚未配置高德 Key，地图选点不可用。请到 https://console.amap.com/dev/key 申请「Web端(JS API)」Key 后填入。",
+    }
+
+@app.post("/api/amap-config")
+def api_amap_save(body: dict, _t: None = Depends(require_token)):
+    key = str(body.get("key", "")).strip()
+    sec = str(body.get("securityJsCode", "")).strip()
+    web = body.get("webKey", None)
+    cur = load_amap_conf()
+    conf = {
+        "key": key,
+        "securityJsCode": sec,
+        # webKey 不传表示保持原值（避免前端拿不到明文后误清空）
+        "webKey": cur["webKey"] if web is None else str(web).strip(),
+    }
+    save_amap_conf(conf)
+    save_log("高德地图", "地图配置已保存",
+             "key=%s 安全密钥=%s Web服务Key=%s" % (
+                 (key[:6] + "***") if key else "（空）",
+                 "已设置" if sec else "未设置",
+                 "已设置" if conf["webKey"] else "未设置"))
+    return {"ok": True, "enabled": bool(key)}
+
+@app.post("/api/amap/regeo")
+def api_amap_regeo(body: dict, _t: None = Depends(require_token)):
+    """逆地理编码：经纬度 → 地址文本。需要「Web服务」类型的 Key。
+    若未配置 Web 服务 Key，返回 ok=False，前端会退化为只用坐标不填地址。"""
+    conf = load_amap_conf()
+    web_key = conf.get("webKey", "")
+    if not web_key:
+        return {"ok": False, "error": "未配置高德 Web 服务 Key，无法逆地理编码（坐标仍可使用）"}
+    try:
+        lon = float(body.get("lon"))
+        lat = float(body.get("lat"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="经纬度必须是数字")
+    # 高德逆地理编码：location 为 "经度,纬度"
+    qs = urllib.parse.urlencode({
+        "key": web_key, "location": "%.6f,%.6f" % (lon, lat), "extensions": "base",
+    })
+    url = "https://restapi.amap.com/v3/geocode/regeo?" + qs
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:
+        return {"ok": False, "error": "请求高德接口失败：%s" % e}
+    if str(data.get("status")) != "1":
+        return {"ok": False, "error": "高德返回错误：%s（info=%s）" % (
+            data.get("info"), data.get("infocode"))}
+    regeo = data.get("regeocode") or {}
+    addr = regeo.get("formatted_address") or ""
+    comp = regeo.get("addressComponent") or {}
+    return {"ok": True, "address": addr, "component": comp}
 
 # ---------------- 批量运行 / 定时 / 日志 ----------------
 @app.post("/api/batch-run")

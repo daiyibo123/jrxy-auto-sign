@@ -186,6 +186,9 @@
   }
   .mask.show{display:flex}
   .modal{background:var(--card);border:1px solid var(--line2);border-radius:16px;padding:26px 28px;width:min(400px,100%)}
+  .modal.wide{width:min(900px,96vw)}
+  .modal.mid{width:min(660px,94vw)}
+  .modal.maxh{max-height:92vh;overflow:auto}
   .modal h3{font-size:16px;margin-bottom:10px}
   .modal p{color:var(--muted);font-size:13px;margin-bottom:16px}
   .spinner{
@@ -373,6 +376,12 @@
           <div class="field"><label>定位地址文本</label><input type="text" id="mAddr" placeholder="签到点地址"></div>
           <button class="primary" onclick="signRangeAcc()">从服务器获取签到范围</button>
         </div>
+        <div class="row">
+          <button class="ghost" type="button" onclick="openMapPicker()">🗺 地图选点</button>
+          <button class="ghost" type="button" onclick="useMyLocation()">📍 用浏览器定位</button>
+          <button class="ghost" type="button" onclick="openAmapConfig()">⚙ 高德 Key 配置</button>
+          <span class="tag" id="mMapState">地图选点：未启用（需配置高德 Key）</span>
+        </div>
         <div class="row"><span class="tag" id="mRangeState"></span></div>
       </div>
 
@@ -434,7 +443,8 @@
 </div>
 
 <div class="mask" id="poolMask">
-  <div class="modal" style="max-width:760px">
+  <div class="modal mid maxh">
+
     <h3>照片池 <span class="tag" style="margin-left:8px">勾选「从照片池中随机选择照片」的账号，每次签到会随机取一张</span></h3>
     <p class="tag" style="margin-bottom:12px">支持一次多选上传；同名文件会覆盖。建议放几张不同角度/时间的照片，避免每次都是同一张。</p>
     <div class="tbl-scroll" style="max-height:340px">
@@ -448,6 +458,60 @@
       <input type="file" id="poolFile" accept="image/*" multiple style="display:none">
       <button class="ghost" onclick="closePoolModal()">关闭</button>
       <span class="tag" id="poolCountHint"></span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="mapMask">
+  <div class="modal wide maxh">
+    <h3>地图选点 <span class="tag" style="margin-left:8px">点击地图或拖动标记选择签到点</span></h3>
+    <div class="row" style="margin:10px 0">
+      <div class="field" style="flex:1 1 260px">
+        <label>搜索地点</label>
+        <input type="text" id="mapSearch" placeholder="输入地点名称，如 大连大学北区，回车搜索">
+      </div>
+      <button class="ghost" type="button" onclick="mapSearchPlace()">搜索</button>
+      <button class="ghost" type="button" onclick="mapUseMyLocation()">用我的位置</button>
+      <span class="tag" id="mapTip"></span>
+    </div>
+    <div id="mapContainer" style="width:100%;height:420px;border-radius:10px;border:1px solid var(--line);background:#0b1220;overflow:hidden"></div>
+    <div class="row" style="margin-top:10px">
+      <div class="field"><label>经度 lon（GCJ-02）</label><input type="text" id="mapLon" readonly style="background:var(--card2)"></div>
+      <div class="field"><label>纬度 lat（GCJ-02）</label><input type="text" id="mapLat" readonly style="background:var(--card2)"></div>
+      <div class="field" style="flex:1 1 240px"><label>地址（可编辑）</label><input type="text" id="mapAddr" placeholder="自动获取或手动填写"></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <button class="primary" onclick="applyMapPick()">使用此坐标</button>
+      <button class="ghost" onclick="closeMapPicker()">取消</button>
+      <span class="tag" id="mapCoordTip">提示：高德地图返回的坐标即为 GCJ-02，与今日校园一致</span>
+    </div>
+  </div>
+</div>
+
+<div class="mask" id="amapCfgMask">
+  <div class="modal mid maxh">
+    <h3>高德地图 Key 配置</h3>
+    <p class="tag" style="margin:8px 0 14px">
+      前往 <a href="https://console.amap.com/dev/key" target="_blank" rel="noopener">高德开放平台控制台</a>
+      创建应用，添加 <b>Web端(JS API)</b> 类型的 Key 得到「Key」与「安全密钥」；
+      如需自动填充地址，再添加一个 <b>Web服务</b> 类型的 Key。不填则只能手动输入经纬度。
+    </p>
+    <div class="field" style="margin-bottom:12px">
+      <label>JS API Key（Web端）</label>
+      <input type="text" id="amapKey" placeholder="留空 = 不启用地图选点" autocomplete="off">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label>安全密钥 securityJsCode</label>
+      <input type="text" id="amapSec" placeholder="2021-12-02 之后申请的 Key 必须填写" autocomplete="off">
+    </div>
+    <div class="field" style="margin-bottom:12px">
+      <label>Web 服务 Key（可选，用于自动获取地址）</label>
+      <input type="password" id="amapWeb" placeholder="留空 = 不自动获取地址（不影响选点）" autocomplete="off">
+    </div>
+    <div class="row">
+      <button class="primary" onclick="saveAmapCfg()">保存</button>
+      <button class="ghost" onclick="closeAmapConfig()">取消</button>
+      <span class="tag" id="amapCfgState"></span>
     </div>
   </div>
 </div>
@@ -620,6 +684,7 @@ async function openAccountModal(name){
     el("mDev").placeholder = "留空=首次运行自动生成（仅限未绑定新账号）；迁移请粘贴原 deviceId";
     el("amFootHint").textContent = "新建必须填写：账号名 / 学校 / 学号 / 密码";  }
   el("accountMask").classList.add("show");
+  if (typeof refreshMapState === "function") refreshMapState();
   if (!editingName) setTimeout(()=>el("mName").focus(), 60);
 }
 function closeAccountModal(){ el("accountMask").classList.remove("show"); }
@@ -793,6 +858,233 @@ async function uploadPhotoAcc(ev){
     toast("照片已上传：" + r.photo + "（" + Math.max(1, Math.round(r.size / 1024)) + " KB）", "ok");
   }catch(e){ toast("上传失败：" + e.message, "bad"); }
   finally{ fi.value = ""; }
+}
+
+/* ================= 高德地图选点 ================= */
+let mapObj = null, mapMarker = null, mapInited = false, mapPicked = null;
+
+async function loadAmapCfg(){
+  try{ return await api("/api/amap-config"); }
+  catch(e){ return {enabled:false, key:"", securityJsCode:""}; }
+}
+function setMapState(text, ok){
+  const t = el("mMapState");
+  if (t){ t.textContent = text; t.style.color = ok ? "var(--ac2)" : ""; }
+}
+async function refreshMapState(){
+  const c = await loadAmapCfg();
+  window.__amap = c;
+  setMapState(c.enabled ? "地图选点：已启用" : "地图选点：未启用（需配置高德 Key）", c.enabled);
+  return c;
+}
+function openAmapConfig(){
+  el("amapCfgMask").classList.add("show");
+  loadAmapCfg().then(c=>{
+    el("amapKey").value = c.key || "";
+    el("amapSec").value = c.securityJsCode || "";
+    el("amapWeb").value = "";
+    el("amapWeb").placeholder = c.webKey_set ? "已设置（留空保持不变）" : "留空 = 不自动获取地址";
+    el("amapCfgState").textContent = c.enabled ? "当前：已启用" : "当前：未启用";
+  });
+}
+function closeAmapConfig(){ el("amapCfgMask").classList.remove("show"); }
+async function saveAmapCfg(){
+  const body = {
+    key: el("amapKey").value.trim(),
+    securityJsCode: el("amapSec").value.trim()
+  };
+  const web = el("amapWeb").value.trim();
+  if (web) body.webKey = web;      // 留空则不改动原有 Web 服务 Key
+  try{
+    const r = await api("/api/amap-config", {method:"POST", body:JSON.stringify(body)});
+    toast(r.enabled ? "已保存，地图选点已启用" : "已保存（Key 为空，地图选点未启用）", "ok");
+    closeAmapConfig();
+    mapInited = false;             // 配置变更后强制重新加载地图
+    refreshMapState();
+    refreshStatus();
+  }catch(e){ toast("保存失败：" + e.message, "bad"); }
+}
+/* 动态加载高德 JS API 2.0（Loader 方式，符合官方要求） */
+function loadAmapSdk(cfg){
+  return new Promise((resolve, reject)=>{
+    if (window.AMap){ resolve(window.AMap); return; }
+    if (!cfg.key){ reject(new Error("未配置高德 Key")); return; }
+    // 安全密钥必须在加载前设置
+    window._AMapSecurityConfig = { securityJsCode: cfg.securityJsCode || "" };
+    const finish = ()=>{
+      if (!window.AMapLoader){ reject(new Error("高德 Loader 加载失败")); return; }
+      AMapLoader.load({
+        key: cfg.key,
+        version: "2.0",
+        plugins: ["AMap.Scale","AMap.ToolBar","AMap.Geocoder","AMap.Geolocation"]
+      }).then(AMap => resolve(AMap)).catch(e => reject(e));
+    };
+    if (window.AMapLoader){ finish(); return; }
+    const s = document.createElement("script");
+    s.src = "https://webapi.amap.com/loader.js";
+    s.onload = finish;
+    s.onerror = ()=> reject(new Error("无法加载高德地图脚本，请检查网络"));
+    document.head.appendChild(s);
+  });
+}
+async function openMapPicker(){
+  const cfg = window.__amap || await loadAmapCfg();
+  if (!cfg.enabled){
+    toast("尚未配置高德 Key，先配置后再用地图选点", "bad");
+    openAmapConfig();
+    return;
+  }
+  el("mapMask").classList.add("show");
+  el("mapTip").textContent = "正在加载地图…";
+  // 预填当前账号已有坐标
+  const curLon = parseFloat(el("mLon").value), curLat = parseFloat(el("mLat").value);
+  try{
+    const AMap = await loadAmapSdk(cfg);
+    el("mapTip").textContent = "";
+    initMap(AMap, curLon, curLat);
+  }catch(e){
+    el("mapTip").textContent = "地图加载失败：" + e.message;
+    toast("地图加载失败：" + e.message, "bad");
+  }
+}
+function closeMapPicker(){ el("mapMask").classList.remove("show"); }
+
+function initMap(AMap, lon, lat){
+  const hasCoord = !isNaN(lon) && !isNaN(lat);
+  // 没有坐标时默认落在大连（可按需改）
+  const center = hasCoord ? [lon, lat] : [121.6147, 38.9140];
+  if (!mapInited){
+    mapObj = new AMap.Map("mapContainer", {
+      zoom: hasCoord ? 17 : 12,
+      center: center,
+      viewMode: "2D"
+    });
+    mapObj.addControl(new AMap.Scale());
+    // 点击地图选点
+    mapObj.on("click", e => setMapMarker(AMap, e.lnglat.getLng(), e.lnglat.getLat(), true));
+    mapInited = true;
+  } else {
+    mapObj.setZoomAndCenter(hasCoord ? 17 : 12, center);
+  }
+  if (hasCoord){
+    setMapMarker(AMap, lon, lat, false);
+  } else {
+    el("mapLon").value = "";
+    el("mapLat").value = "";
+    el("mapAddr").value = "";
+    mapPicked = null;
+  }
+  // 容器在弹窗内，显示后需要触发一次 resize
+  setTimeout(()=>{ try{ mapObj.resize(); }catch(e){} }, 120);
+}
+function setMapMarker(AMap, lon, lat, doGeocode){
+  const pos = [lon, lat];
+  if (!mapMarker){
+    mapMarker = new AMap.Marker({ position: pos, draggable: true, cursor: "move" });
+    mapMarker.on("dragend", e=>{
+      const p = e.target.getPosition();
+      setMapMarker(window.AMap, p.getLng(), p.getLat(), true);
+    });
+    mapObj.add(mapMarker);
+  } else {
+    mapMarker.setPosition(pos);
+  }
+  mapPicked = {lon, lat};
+  el("mapLon").value = Number(lon).toFixed(6);
+  el("mapLat").value = Number(lat).toFixed(6);
+  el("mapTip").textContent = "已选点，可拖动标记微调";
+  if (doGeocode) reverseGeocode(lon, lat);
+}
+async function reverseGeocode(lon, lat){
+  el("mapAddr").placeholder = "正在获取地址…";
+  try{
+    const r = await api("/api/amap/regeo", {method:"POST", body:JSON.stringify({lon, lat})});
+    if (r.ok && r.address){
+      el("mapAddr").value = r.address;
+      el("mapCoordTip").textContent = "地址已自动填充（高德逆地理编码）";
+    } else {
+      el("mapCoordTip").textContent = r.error || "未能获取地址，可手动填写";
+    }
+  }catch(e){
+    el("mapCoordTip").textContent = "获取地址失败：" + e.message + "（可手动填写）";
+  }finally{
+    el("mapAddr").placeholder = "自动获取或手动填写";
+  }
+}
+async function mapSearchPlace(){
+  const kw = el("mapSearch").value.trim();
+  if (!kw){ toast("请输入要搜索的地点", "bad"); return; }
+  const cfg = window.__amap || await loadAmapCfg();
+  if (!cfg.enabled){ toast("未配置高德 Key", "bad"); return; }
+  try{
+    const AMap = await loadAmapSdk(cfg);
+    const ps = new AMap.PlaceSearch({ pageSize: 1 });
+    el("mapTip").textContent = "搜索中…";
+    ps.search(kw, (status, result)=>{
+      const pois = (result && result.poiList && result.poiList.pois) || [];
+      if (status === "complete" && pois.length){
+        const p = pois[0];
+        el("mapAddr").value = p.name + (p.address ? ("（" + p.address + "）") : "");
+        el("mapCoordTip").textContent = "已定位到：" + p.name;
+        mapObj.setZoomAndCenter(17, [p.location.lng, p.location.lat]);
+        setMapMarker(AMap, p.location.lng, p.location.lat, false);
+        el("mapTip").textContent = "找到 1 个结果";
+      } else {
+        el("mapTip").textContent = "未找到该地点，请换个关键词";
+      }
+    });
+  }catch(e){ toast("搜索失败：" + e.message, "bad"); }
+}
+function mapUseMyLocation(){
+  if (!navigator.geolocation){ toast("浏览器不支持定位", "bad"); return; }
+  el("mapTip").textContent = "正在获取浏览器定位…";
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const {longitude, latitude} = pos.coords;
+      // 浏览器给的是 WGS-84，高德需要 GCJ-02，用高德转换
+      if (mapObj && window.AMap && AMap.convertFrom){
+        AMap.convertFrom([longitude, latitude], "gps", (status, result)=>{
+          if (status === "complete" && result.locations && result.locations.length){
+            const p = result.locations[0];
+            mapObj.setZoomAndCenter(17, [p.lng, p.lat]);
+            setMapMarker(AMap, p.lng, p.lat, true);
+          } else {
+            mapObj.setZoomAndCenter(17, [longitude, latitude]);
+            setMapMarker(AMap, longitude, latitude, true);
+          }
+        });
+      } else if (mapObj){
+        mapObj.setZoomAndCenter(17, [longitude, latitude]);
+        setMapMarker(window.AMap, longitude, latitude, true);
+      }
+    },
+    err => { el("mapTip").textContent = "定位失败：" + err.message; },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+/* 账号弹窗里的“用浏览器定位”：不走地图，直接把坐标填进输入框 */
+function useMyLocation(){
+  if (!navigator.geolocation){ toast("浏览器不支持定位", "bad"); return; }
+  toast("正在获取定位…", "ok");
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lon = pos.coords.longitude, lat = pos.coords.latitude;
+      el("mLon").value = lon.toFixed(6);
+      el("mLat").value = lat.toFixed(6);
+      toast("已填入坐标。注意：浏览器返回 WGS-84，如需精确请用「地图选点」转换", "ok");
+    },
+    err => toast("定位失败：" + err.message, "bad"),
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+function applyMapPick(){
+  if (!mapPicked){ toast("请先在地图上点选一个位置", "bad"); return; }
+  el("mLon").value = Number(mapPicked.lon).toFixed(6);
+  el("mLat").value = Number(mapPicked.lat).toFixed(6);
+  const addr = el("mapAddr").value.trim();
+  if (addr) el("mAddr").value = addr;
+  toast("已应用坐标：" + el("mLon").value + ", " + el("mLat").value, "ok");
+  closeMapPicker();
 }
 
 /* ================= 定时 ================= */
@@ -1008,11 +1300,16 @@ function startClock(){
 }
 startClock();
 refreshAll();
-document.addEventListener("keydown", e=>{ if (e.key === "Escape"){ closeAccountModal(); closePoolModal(); } });
+document.addEventListener("keydown", e=>{
+  if (e.key === "Escape"){ closeAccountModal(); closePoolModal(); closeMapPicker(); closeAmapConfig(); }
+});
 el("accountMask").addEventListener("click", e=>{ if (e.target === el("accountMask")) closeAccountModal(); });
 el("poolMask").addEventListener("click", e=>{ if (e.target === el("poolMask")) closePoolModal(); });
+el("mapMask").addEventListener("click", e=>{ if (e.target === el("mapMask")) closeMapPicker(); });
+el("amapCfgMask").addEventListener("click", e=>{ if (e.target === el("amapCfgMask")) closeAmapConfig(); });
 el("mPhotoFile").addEventListener("change", uploadPhotoAcc);
 el("poolFile").addEventListener("change", uploadPoolPhotos);
+el("mapSearch").addEventListener("keydown", e=>{ if (e.key === "Enter"){ e.preventDefault(); mapSearchPlace(); } });
 setInterval(()=>{ api("/api/status").then(renderStatus).catch(()=>{}); }, 60000);
 setInterval(()=>{ loadLogs(); }, 30000);
 </script>
