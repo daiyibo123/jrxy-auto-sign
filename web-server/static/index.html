@@ -204,6 +204,8 @@
   .pool-drop-text{font-size:13px;color:var(--text)}
   .pool-link{color:var(--info);text-decoration:underline}
   .pool-drop-hint{font-size:11px;color:var(--faint);margin-top:4px}
+  /* 独立定时表：窄屏不压缩列，改为横向滚动（仅本功能新增表） */
+  .per-acct-tbl{min-width:640px}
   .spinner{
     display:inline-block;width:14px;height:14px;border:2px solid rgba(255,255,255,.25);
     border-top-color:var(--text);border-radius:50%;animation:spin .8s linear infinite;
@@ -308,7 +310,7 @@
     </div>
     <div id="perAcctPanel" style="display:none;margin-top:12px">
       <div class="tbl-scroll">
-        <table>
+        <table class="per-acct-tbl">
           <thead><tr><th style="width:180px">账号</th><th style="width:130px">独立定时</th><th style="width:200px">时间（HH:MM）</th><th>下次执行</th><th style="width:140px">操作</th></tr></thead>
           <tbody id="perAcctBody"><tr><td colspan="5" style="text-align:center;color:var(--muted)">加载中…</td></tr></tbody>
         </table>
