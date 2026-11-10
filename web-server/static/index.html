@@ -404,18 +404,6 @@
       <div class="am-group">
         <div class="row">
           <div class="field"><label>异常原因（无则留空）</label><input type="text" id="mAbn" placeholder="如 信号异常"></div>
-          <div class="field"><label>签到照片（可选）</label>
-            <div style="display:flex;gap:8px">
-              <input type="text" id="mPhoto" placeholder="选择或输入文件名，如 daka.jpg" style="flex:1">
-              <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
-              <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
-            </div>
-            <label style="display:flex;align-items:center;gap:7px;cursor:pointer;margin-top:2px;font-size:12px;color:var(--muted);font-weight:400">
-              <input type="checkbox" id="mPhotoRandom" style="width:14px;height:14px;margin:0">
-              从照片池中随机选择照片
-            </label>
-            <div class="hint" id="mPoolHint" style="margin-top:0">照片池：加载中…</div>
-          </div>
           <div class="field"><label>表单标题校验</label>
             <select id="mTitle">
               <option value="0">0 不校验</option>
@@ -429,7 +417,23 @@
             </select>
           </div>
         </div>
-        <div class="row">
+        <div class="row" style="margin-top:12px">
+          <div class="field" style="flex:1 1 100%"><label>签到照片（可选）</label>
+            <div style="display:flex;gap:8px">
+              <input type="text" id="mPhoto" placeholder="选择或输入文件名，如 daka.jpg" style="flex:1">
+              <button class="ghost" type="button" onclick="el('mPhotoFile').click()">浏览…</button>
+              <input type="file" id="mPhotoFile" accept="image/*" style="display:none">
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:2px">
+              <label style="display:flex;align-items:center;gap:7px;cursor:pointer;margin:0;font-size:12px;color:var(--muted);font-weight:400">
+                <input type="checkbox" id="mPhotoRandom" style="width:14px;height:14px;margin:0">
+                从照片池中随机选择照片
+              </label>
+              <span class="hint" id="mPoolHint" style="margin:0">照片池：加载中…</span>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:14px">
           <div class="field" style="flex:1 1 100%"><label>Server酱 SendKey（SCT开头）或完整推送地址</label><input type="text" id="mNotifyRcv" placeholder="如 SCTxxxx 或 https://sctapi.ftqq.com/SCTxxxx.send"></div>
         </div>
       </div>
